@@ -5,6 +5,8 @@ defmodule Membrane.MOQX.MixProject do
     [
       app: :membrane_moqx_plugin,
       version: "0.1.0",
+      description:
+        "Membrane Source and Sink elements for publishing and subscribing through MOQX",
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       deps: deps()
@@ -21,8 +23,9 @@ defmodule Membrane.MOQX.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      # {:dep_from_hexpm, "~> 0.3.0"},
-      # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
+      {:membrane_core, "~> 1.3.4"},
+      {:moqx, github: "dmorn/moqx", branch: "main"},
+      {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false}
     ]
   end
 end
