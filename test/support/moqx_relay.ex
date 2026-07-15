@@ -53,6 +53,17 @@ defmodule Membrane.MOQX.TestRelay do
     end
   end
 
+  def await_connection_close(%__MODULE__{task: task}) do
+    send(task.pid, {:await_connection_close, self()})
+
+    receive do
+      :connection_closed -> :ok
+      {:relay_error, reason} -> {:error, reason}
+    after
+      @timeout -> {:error, :connection_close_timeout}
+    end
+  end
+
   def capture_many(%__MODULE__{task: task}, track, count) do
     send(task.pid, {:capture_many, self(), track, count})
 
@@ -191,6 +202,9 @@ defmodule Membrane.MOQX.TestRelay do
       {:await_shutdown, _caller} = message ->
         handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
 
+      {:await_connection_close, _caller} = message ->
+        handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
+
       {:capture_many, _caller, _track, _count} = message ->
         handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
 
@@ -220,6 +234,20 @@ defmodule Membrane.MOQX.TestRelay do
   defp handle_relay_message({:await_shutdown, caller}, ctx, conn, control, namespace, _next_id) do
     case receive_shutdown(ctx, conn, control, namespace) do
       {:ok, _ctx} -> send(caller, :relay_shutdown)
+      {:error, reason, _ctx} -> send(caller, {:relay_error, reason})
+    end
+  end
+
+  defp handle_relay_message(
+         {:await_connection_close, caller},
+         ctx,
+         conn,
+         _control,
+         _namespace,
+         _next_id
+       ) do
+    case receive_connection_close(ctx, conn) do
+      {:ok, _ctx} -> send(caller, :connection_closed)
       {:error, reason, _ctx} -> send(caller, {:relay_error, reason})
     end
   end

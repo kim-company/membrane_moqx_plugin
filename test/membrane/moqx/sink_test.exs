@@ -126,6 +126,11 @@ defmodule Membrane.MOQX.SinkTest do
       {:track_removed, Pad.ref(:input, :video), "video.m4s"}
     )
 
+    assert {:ok, [end_object]} = TestRelay.capture_many(relay, "video.m4s", 1)
+
+    assert {end_object.group_id, end_object.object_id, end_object.status, end_object.payload} ==
+             {1, 0, :end_of_track, <<>>}
+
     assert {:ok, %{".catalog" => removed_catalog}} = TestRelay.capture(relay, [".catalog"])
     assert %{"tracks" => []} = JSON.decode!(removed_catalog.payload)
 
@@ -430,6 +435,31 @@ defmodule Membrane.MOQX.SinkTest do
     )
 
     assert_child_terminated(pipeline, :sink)
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+  end
+
+  test "closes the MOQX connection when the Sink is killed" do
+    namespace = ["live", "sink-killed"]
+    relay = TestRelay.start(namespace)
+
+    sink = %Sink{
+      endpoint: relay.endpoint,
+      protocol: :cloudflare_draft_14,
+      namespace: namespace,
+      transport: TestRelay.transport(relay)
+    }
+
+    spec = {child(:sink, sink), group: :fatal_sink, crash_group_mode: :temporary}
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+
+    sink_pid = Testing.Pipeline.get_child_pid!(pipeline, :sink)
+    sink_monitor = Process.monitor(sink_pid)
+    Process.exit(sink_pid, :kill)
+
+    assert_receive {:DOWN, ^sink_monitor, :process, ^sink_pid, :killed}
+    assert :ok = TestRelay.await_connection_close(relay)
 
     assert :ok = Testing.Pipeline.terminate(pipeline)
   end
