@@ -8,6 +8,7 @@ defmodule Membrane.MOQX.MixProject do
       description:
         "Membrane Source and Sink elements for publishing and subscribing through MOQX",
       elixir: "~> 1.20",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
@@ -20,10 +21,14 @@ defmodule Membrane.MOQX.MixProject do
     ]
   end
 
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_env), do: ["lib"]
+
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
       {:membrane_core, "~> 1.3.4"},
+      {:membrane_cmaf_format, "~> 0.7.1"},
       {:moqx, github: "dmorn/moqx", branch: "main"},
       {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false}
     ]
