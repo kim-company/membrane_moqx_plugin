@@ -1,7 +1,7 @@
 # Membrane MOQX Plugin
 
 Membrane Framework Source and Sink elements for receiving and publishing
-Media over QUIC through [`moqx`](https://github.com/dmorn/moqx).
+arbitrary named object tracks through [`moqx`](https://github.com/dmorn/moqx).
 
 The initial integration targets Cloudflare's deployed MOQT draft-14 relays over
 native QUIC. `moqx` owns the transport and protocol lifecycle; this project
@@ -19,14 +19,17 @@ The first version will rely on Membrane's Toilet for pipeline overload handling.
 Protocol-neutral demand credits and bounded delivery inside `moqx` are deferred
 until real pipeline usage demonstrates that they are needed.
 
-## Media boundary
+## Track boundary
 
-MOQT transports media objects; it does not define raw codec framing. Core
-Sources and Sinks exchange `Membrane.MOQX.Track` stream formats and buffers with
-`Membrane.MOQX.Unit` metadata. Format adapters translate that canonical
-contract without changing payload bytes. Pipelines that need frame-level H.264
-or AAC buffers compose the appropriate CMAF/MP4 muxer or demuxer outside the
-core elements.
+MOQT transports opaque named objects. Core Sources and Sinks do not assume that
+a track contains audio or video. They exchange `Membrane.MOQX.Track` stream
+formats and buffers with `Membrane.MOQX.Unit` metadata. A track contains an open
+string packaging identifier, optional initialization bytes, generic selection
+parameters, and additional JSON-compatible catalog fields.
+
+Format adapters translate that canonical contract without changing payload
+bytes. Pipelines that need frame-level H.264 or AAC buffers compose the
+appropriate CMAF/MP4 muxer or demuxer outside the core elements.
 
 ## Elements
 
@@ -95,6 +98,22 @@ Adapters translate media descriptions and unit metadata only. Core Sources and
 Sinks remain the owners of subscriptions, publications, MOQ coordinates,
 catalog state, and lifecycle. Adapter selection is explicit in the children
 spec; there is no global registry or Application-environment lookup.
+
+The canonical format is not limited to media. A subtitle or application track
+can be supplied directly:
+
+```elixir
+%Membrane.MOQX.Track{
+  packaging: "webvtt",
+  initialization: nil,
+  selection_params: %{"mimeType" => "text/vtt", "lang" => "it"},
+  catalog_fields: %{"label" => "Italian subtitles"}
+}
+```
+
+Each corresponding buffer carries `%Membrane.MOQX.Unit{group_end?: boolean}`
+under `buffer.metadata.moqx`. The Sink assigns fresh MOQ coordinates; received
+coordinates on Source buffers remain available for observation and adapters.
 
 ## Installation
 

@@ -11,10 +11,9 @@ defmodule Membrane.MOQX.TestPacketAdapter do
   def to_moqx_stream_format(%Membrane.MOQX.TestPacketFormat{codec: codec}, _options) do
     track =
       %Membrane.MOQX.Track{
-        packaging: :packet,
-        content_types: [:audio],
+        packaging: "packet",
         initialization: nil,
-        codecs: [codec]
+        selection_params: %{"codec" => codec}
       }
 
     {:ok, track, track}
@@ -22,7 +21,7 @@ defmodule Membrane.MOQX.TestPacketAdapter do
 
   @impl true
   def to_moqx_buffer(%Membrane.Buffer{} = buffer, %Membrane.MOQX.Track{} = track) do
-    buffer = %{buffer | metadata: %{moqx: %Membrane.MOQX.Unit{segment_end?: true}}}
+    buffer = %{buffer | metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}}
     {:ok, buffer, track}
   end
 end
@@ -41,27 +40,27 @@ defmodule Membrane.MOQX.SinkTest do
 
   require Pad
 
-  test "publishes the canonical MOQX track format without format-specific knowledge" do
-    namespace = ["live", "canonical"]
+  test "publishes a generic subtitle track without audio or video assumptions" do
+    namespace = ["live", "subtitles"]
     relay = TestRelay.start(namespace)
 
     stream_format = %Membrane.MOQX.Track{
-      packaging: :custom,
-      content_types: [:audio],
+      packaging: "webvtt",
       initialization: nil,
-      codecs: ["custom.audio"]
+      selection_params: %{"mimeType" => "text/vtt", "lang" => "it"},
+      catalog_fields: %{"label" => "Italian subtitles"}
     }
 
     buffer = %Buffer{
-      payload: "canonical-media",
-      metadata: %{moqx: %Membrane.MOQX.Unit{segment_end?: true}}
+      payload: "WEBVTT\n\n00:00.000 --> 00:02.000\nCiao!",
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
     }
 
     spec =
       child(:source, %TestDynamicSource{stream_format: stream_format, buffer: buffer})
-      |> via_out(Pad.ref(:output, :canonical))
-      |> via_in(Pad.ref(:input, :canonical),
-        options: [track_name: "audio.custom", retention: :latest]
+      |> via_out(Pad.ref(:output, :subtitles))
+      |> via_in(Pad.ref(:input, :subtitles),
+        options: [track_name: "subtitles.it.vtt", retention: :latest]
       )
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
@@ -75,18 +74,19 @@ defmodule Membrane.MOQX.SinkTest do
     assert_pipeline_notified(
       pipeline,
       :sink,
-      {:track_ready, Pad.ref(:input, :canonical), "audio.custom"}
+      {:track_ready, Pad.ref(:input, :subtitles), "subtitles.it.vtt"}
     )
 
-    assert {:ok, objects} = TestRelay.capture(relay, [".catalog", "audio.custom"])
-    assert objects["audio.custom"].payload == "canonical-media"
+    assert {:ok, objects} = TestRelay.capture(relay, [".catalog", "subtitles.it.vtt"])
+    assert objects["subtitles.it.vtt"].payload == buffer.payload
 
     assert %{
              "tracks" => [
                %{
-                 "name" => "audio.custom",
-                 "packaging" => "custom",
-                 "selectionParams" => %{"codec" => "custom.audio"}
+                 "name" => "subtitles.it.vtt",
+                 "packaging" => "webvtt",
+                 "selectionParams" => %{"mimeType" => "text/vtt", "lang" => "it"},
+                 "label" => "Italian subtitles"
                }
              ]
            } = JSON.decode!(objects[".catalog"].payload)
@@ -370,16 +370,19 @@ defmodule Membrane.MOQX.SinkTest do
 
     late_pad_spec =
       child(:late_source, %Testing.Source{output: {:ready, generator}, stream_format: format})
-      |> child(:late_adapter, %ToTrack{adapter: Membrane.MOQX.TrackAdapter.CMAF})
+      |> child(:late_adapter, %ToTrack{
+        adapter: Membrane.MOQX.TrackAdapter.CMAF,
+        adapter_options: [
+          selection_params: %{"lang" => "en"},
+          catalog_fields: %{"renderGroup" => 1, "altGroup" => 2}
+        ]
+      })
       |> via_out(Pad.ref(:output, :audio))
       |> via_in(Pad.ref(:input, :audio),
         options: [
           track_name: "audio.m4s",
           init_track_name: "audio.init.mp4",
-          retention: :latest,
-          language: "en",
-          render_group: 1,
-          alt_group: 2
+          retention: :latest
         ]
       )
       |> get_child(:sink)

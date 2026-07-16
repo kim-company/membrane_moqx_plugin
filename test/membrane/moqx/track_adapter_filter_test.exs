@@ -39,11 +39,14 @@ defmodule Membrane.MOQX.TrackAdapterFilterTest do
       pipeline,
       :sink,
       %Track{
-        packaging: :cmaf,
-        content_types: [:video],
+        packaging: "cmaf",
         initialization: "cmaf-init",
-        codecs: ["avc1.42C01F"],
-        resolution: {1920, 1080}
+        selection_params: %{
+          "codec" => "avc1.42C01F",
+          "mimeType" => "video/mp4",
+          "width" => 1920,
+          "height" => 1080
+        }
       }
     )
 
@@ -54,9 +57,7 @@ defmodule Membrane.MOQX.TrackAdapterFilterTest do
         payload: "unchanged-cmaf-segment",
         metadata: %{
           moqx: %Unit{
-            segment_end?: true,
-            independent?: true,
-            duration: 2_000
+            group_end?: true
           }
         }
       }
@@ -67,17 +68,18 @@ defmodule Membrane.MOQX.TrackAdapterFilterTest do
 
   test "converts the canonical MOQX pad contract back into H264 CMAF" do
     track = %Track{
-      packaging: :cmaf,
-      content_types: [:video],
+      packaging: "cmaf",
       initialization: "cmaf-init",
-      codecs: ["avc1.42C01F"],
-      resolution: {1920, 1080}
+      selection_params: %{
+        "codec" => "avc1.42C01F",
+        "mimeType" => "video/mp4",
+        "width" => 1920,
+        "height" => 1080
+      }
     }
 
     unit = %Unit{
-      segment_end?: true,
-      independent?: true,
-      duration: 2_000,
+      group_end?: true,
       group_id: 7,
       subgroup_id: 0,
       object_id: 3,
@@ -114,9 +116,7 @@ defmodule Membrane.MOQX.TrackAdapterFilterTest do
         payload: "unchanged-cmaf-segment",
         metadata: %{
           moqx: ^unit,
-          last_chunk?: true,
-          independent?: true,
-          duration: 2_000
+          last_chunk?: true
         }
       }
     )

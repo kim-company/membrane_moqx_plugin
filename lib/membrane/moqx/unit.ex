@@ -1,16 +1,14 @@
 defmodule Membrane.MOQX.Unit do
   @moduledoc """
-  Canonical metadata for one atomic MOQX media buffer.
+  Canonical metadata for one atomic MOQX object buffer.
 
-  Publication adapters set the media-unit fields. A Source additionally fills
-  received MOQ coordinates, priority, and status when they are available.
+  Publication adapters declare whether the object ends its MOQ group. A Source
+  additionally fills received coordinates, priority, and status when available.
   """
 
-  @enforce_keys [:segment_end?]
+  @enforce_keys [:group_end?]
   defstruct @enforce_keys ++
               [
-                independent?: nil,
-                duration: nil,
                 group_id: nil,
                 subgroup_id: nil,
                 object_id: nil,
@@ -21,9 +19,7 @@ defmodule Membrane.MOQX.Unit do
   @type status :: :object_does_not_exist | :end_of_group | :end_of_track | nil
 
   @type t :: %__MODULE__{
-          segment_end?: boolean(),
-          independent?: boolean() | nil,
-          duration: Membrane.Time.t() | nil,
+          group_end?: boolean(),
           group_id: non_neg_integer() | nil,
           subgroup_id: non_neg_integer() | nil,
           object_id: non_neg_integer() | nil,
@@ -43,9 +39,7 @@ defmodule Membrane.MOQX.Unit do
   @spec validate(t()) :: {:ok, t()} | {:error, {:invalid_moqx_unit, t()}}
   def validate(%__MODULE__{} = unit) do
     valid? =
-      is_boolean(unit.segment_end?) and
-        optional_boolean?(unit.independent?) and
-        optional_non_negative_integer?(unit.duration) and
+      is_boolean(unit.group_end?) and
         optional_non_negative_integer?(unit.group_id) and
         optional_non_negative_integer?(unit.subgroup_id) and
         optional_non_negative_integer?(unit.object_id) and
@@ -54,8 +48,6 @@ defmodule Membrane.MOQX.Unit do
 
     if valid?, do: {:ok, unit}, else: {:error, {:invalid_moqx_unit, unit}}
   end
-
-  defp optional_boolean?(value), do: is_nil(value) or is_boolean(value)
 
   defp optional_non_negative_integer?(value),
     do: is_nil(value) or (is_integer(value) and value >= 0)

@@ -2,26 +2,30 @@ defmodule Membrane.MOQX.Track do
   @moduledoc """
   Canonical Membrane stream format exchanged by MOQX Sources and Sinks.
 
-  Format adapters translate concrete packaged formats into and out of this
-  contract. The core MOQX elements never depend on those concrete formats.
+  `packaging` is an open application-defined identifier. Selection parameters
+  and additional catalog fields are JSON-compatible string-keyed maps, so the
+  contract can describe media, subtitles, timed metadata, or arbitrary data.
+  Core MOQX elements never interpret format-specific values.
+
+  The Sink owns catalog structure and rejects `catalog_fields` entries that
+  would overwrite `name`, namespace, initialization, packaging, or selection
+  parameters.
   """
 
-  @enforce_keys [:packaging, :content_types, :initialization, :codecs]
+  @reserved_catalog_fields ~w(name namespace initTrack initData packaging selectionParams)
+
+  @enforce_keys [:packaging, :initialization]
   defstruct @enforce_keys ++
               [
-                resolution: nil,
-                sample_rate: nil,
-                channels: nil
+                selection_params: %{},
+                catalog_fields: %{}
               ]
 
   @type t :: %__MODULE__{
-          packaging: atom(),
-          content_types: [:audio | :video],
+          packaging: binary(),
           initialization: binary() | nil,
-          codecs: [binary()],
-          resolution: {non_neg_integer(), non_neg_integer()} | nil,
-          sample_rate: pos_integer() | nil,
-          channels: pos_integer() | nil
+          selection_params: map(),
+          catalog_fields: map()
         }
 
   @spec validate(t()) :: :ok | {:error, {:invalid_track, t()}}
@@ -30,35 +34,30 @@ defmodule Membrane.MOQX.Track do
   end
 
   defp valid?(track) do
-    Enum.all?([
-      valid_packaging?(track.packaging),
-      valid_content_types?(track.content_types),
-      valid_initialization?(track.initialization),
-      valid_codecs?(track.codecs),
-      valid_resolution?(track.resolution),
-      valid_optional_positive_integer?(track.sample_rate),
-      valid_optional_positive_integer?(track.channels)
-    ])
+    is_binary(track.packaging) and byte_size(track.packaging) > 0 and
+      valid_initialization?(track.initialization) and
+      valid_json_map?(track.selection_params) and valid_catalog_fields?(track.catalog_fields)
   end
-
-  defp valid_packaging?(packaging), do: is_atom(packaging) and not is_nil(packaging)
-
-  defp valid_content_types?(content_types),
-    do: content_types != [] and Enum.all?(content_types, &(&1 in [:audio, :video]))
 
   defp valid_initialization?(initialization),
     do: is_binary(initialization) or is_nil(initialization)
 
-  defp valid_codecs?(codecs), do: codecs != [] and Enum.all?(codecs, &is_binary/1)
-
-  defp valid_resolution?(nil), do: true
-
-  defp valid_resolution?({width, height}) do
-    is_integer(width) and width >= 0 and is_integer(height) and height >= 0
+  defp valid_catalog_fields?(fields) do
+    valid_json_map?(fields) and
+      Enum.all?(Map.keys(fields), &(&1 not in @reserved_catalog_fields))
   end
 
-  defp valid_resolution?(_resolution), do: false
+  defp valid_json_map?(value) when is_map(value) do
+    Enum.all?(value, fn {key, value} -> is_binary(key) and valid_json_value?(value) end)
+  end
 
-  defp valid_optional_positive_integer?(nil), do: true
-  defp valid_optional_positive_integer?(value), do: is_integer(value) and value > 0
+  defp valid_json_map?(_value), do: false
+
+  defp valid_json_value?(value)
+       when is_binary(value) or is_boolean(value) or is_number(value) or is_nil(value),
+       do: true
+
+  defp valid_json_value?(value) when is_list(value), do: Enum.all?(value, &valid_json_value?/1)
+  defp valid_json_value?(value) when is_map(value), do: valid_json_map?(value)
+  defp valid_json_value?(_value), do: false
 end

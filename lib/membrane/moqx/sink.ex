@@ -19,10 +19,7 @@ defmodule Membrane.MOQX.Sink do
     options: [
       track_name: [spec: binary(), required: true],
       init_track_name: [spec: binary() | nil, default: nil],
-      retention: [spec: :live | :latest | :all, default: :live],
-      language: [spec: binary() | nil, default: nil],
-      render_group: [spec: non_neg_integer() | nil, default: nil],
-      alt_group: [spec: non_neg_integer() | nil, default: nil]
+      retention: [spec: :live | :latest | :all, default: :live]
     ]
 
   def_options endpoint: [spec: binary() | URI.t(), required: true],
@@ -254,7 +251,7 @@ defmodule Membrane.MOQX.Sink do
              publisher_priority: state.publisher_priority,
              payload: buffer.payload
            }) do
-      pad_state = advance_coordinates(pad_state, unit.segment_end?)
+      pad_state = advance_coordinates(pad_state, unit.group_end?)
       {[], put_in(state, [:pads, pad], pad_state)}
     else
       {:error, reason} -> raise "failed to publish MOQX object: #{inspect(reason)}"
@@ -452,36 +449,21 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp catalog_track(pad_state) do
-    track = pad_state.track
     options = pad_state.options
+    track = pad_state.track
 
-    selection_params =
-      %{"codec" => List.first(track.codecs)}
-      |> put_resolution(track.resolution)
-      |> put_map_if_present("samplerate", track.sample_rate)
-      |> put_map_if_present("channelConfig", track.channels)
-      |> put_map_if_present("lang", options.language)
-
-    %{
-      "name" => options.track_name,
-      "packaging" => Atom.to_string(track.packaging),
-      "selectionParams" => selection_params
-    }
+    track.catalog_fields
+    |> Map.put("name", options.track_name)
+    |> Map.put("packaging", track.packaging)
+    |> put_map_unless_empty("selectionParams", track.selection_params)
     |> put_map_if_present("initTrack", pad_state.init_track_name)
-    |> put_map_if_present("renderGroup", options.render_group)
-    |> put_map_if_present("altGroup", options.alt_group)
   end
 
   defp put_map_if_present(map, _key, nil), do: map
   defp put_map_if_present(map, key, value), do: Map.put(map, key, value)
 
-  defp put_resolution(params, nil), do: params
-
-  defp put_resolution(params, {width, height}) do
-    params
-    |> Map.put("width", width)
-    |> Map.put("height", height)
-  end
+  defp put_map_unless_empty(map, _key, value) when value == %{}, do: map
+  defp put_map_unless_empty(map, key, value), do: Map.put(map, key, value)
 
   defp advance_coordinates(pad_state, true) do
     %{pad_state | group_id: pad_state.group_id + 1, object_id: 0}
