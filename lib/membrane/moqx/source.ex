@@ -1,0 +1,303 @@
+defmodule Membrane.MOQX.Source do
+  @moduledoc """
+  Subscribes to exactly one MOQ track and emits the canonical MOQX pad format.
+
+  Payload bytes remain unchanged. Received MOQ coordinates, priority, status,
+  and inferred group boundaries are stored in Membrane.MOQX.Unit metadata.
+  """
+
+  use Membrane.Source
+
+  alias Membrane.MOQX.{Session, Track, Unit}
+
+  def_output_pad :output,
+    flow_control: :push,
+    accepted_format: %Track{}
+
+  def_options endpoint: [spec: binary() | URI.t() | nil, default: nil],
+              protocol: [spec: atom() | module() | nil, default: nil],
+              session: [spec: pid() | nil, default: nil],
+              track: [spec: MOQX.TrackRef.t(), required: true],
+              stream_format: [spec: Track.t(), required: true],
+              authorization: [spec: MOQX.Secret.t() | nil, default: nil],
+              timeout: [spec: pos_integer(), default: 5_000],
+              connect_options: [spec: keyword(), default: []],
+              transport: [spec: term(), default: nil],
+              start_policy: [spec: :current | :next_group, default: :current],
+              subscription_options: [spec: keyword(), default: []]
+
+  @impl true
+  def handle_init(_ctx, options) do
+    state =
+      options
+      |> Map.from_struct()
+      |> Map.merge(%{
+        client: nil,
+        subscription: nil,
+        accepted?: false,
+        playing?: false,
+        pending_object: nil,
+        queued_events: [],
+        initial_group: nil,
+        ended?: false
+      })
+
+    {[], state}
+  end
+
+  @impl true
+  def handle_setup(_ctx, state) do
+    with :ok <- Track.validate(state.stream_format),
+         :ok <- validate_connection_options(state),
+         {:ok, client, subscription} <- start_subscription(state) do
+      state = %{state | client: client, subscription: subscription}
+      {[setup: :incomplete], state}
+    else
+      {:error, reason} -> raise "failed to set up MOQX subscription: #{inspect(reason)}"
+    end
+  end
+
+  @impl true
+  def handle_playing(_ctx, state) do
+    state = %{state | playing?: true}
+    {queued_actions, state} = consume_queued_events(state)
+    {[stream_format: {:output, state.stream_format}] ++ queued_actions, state}
+  end
+
+  @impl true
+  def handle_info({:moqx, client, event}, ctx, %{client: client} = state),
+    do: handle_event(event, ctx, state)
+
+  def handle_info({:moqx_session, session, event}, ctx, %{session: session} = state),
+    do: handle_event(event, ctx, state)
+
+  def handle_info(_message, _ctx, state), do: {[], state}
+
+  defp handle_event(
+         %MOQX.Event.SubscriptionAccepted{subscription: subscription},
+         _ctx,
+         %{subscription: subscription} = state
+       ) do
+    actions = [
+      setup: :complete,
+      notify_parent: {:subscription_ready, state.track}
+    ]
+
+    {actions, %{state | accepted?: true}}
+  end
+
+  defp handle_event(
+         %MOQX.Event.ObjectReceived{object: object},
+         _ctx,
+         %{subscription: subscription} = state
+       )
+       when object.subscription == subscription do
+    consume_or_queue({:object, object}, state)
+  end
+
+  defp handle_event(
+         %MOQX.Event.ObjectStatus{object: object},
+         _ctx,
+         %{subscription: subscription} = state
+       )
+       when object.subscription == subscription do
+    consume_or_queue({:object, object}, state)
+  end
+
+  defp handle_event(
+         %MOQX.Event.SubscriptionDone{
+           subscription: subscription,
+           completion: completion
+         },
+         _ctx,
+         %{subscription: subscription} = state
+       ) do
+    consume_or_queue({:subscription_done, completion}, state)
+  end
+
+  defp handle_event(
+         %MOQX.Event.SubscriptionFailed{subscription: subscription, error: error},
+         _ctx,
+         %{subscription: subscription} = state
+       ) do
+    notification = {:subscription_failed, state.track, error}
+
+    actions =
+      if(state.accepted?, do: [], else: [setup: :complete]) ++
+        [notify_parent: notification, terminate: {:shutdown, notification}]
+
+    {actions, state}
+  end
+
+  defp handle_event(%MOQX.Event.ConnectionClosed{metadata: metadata}, _ctx, state) do
+    notification = {:connection_closed, metadata}
+    {[notify_parent: notification, terminate: {:shutdown, notification}], state}
+  end
+
+  defp handle_event(%MOQX.Event.ProtocolFailed{reason: reason}, _ctx, state) do
+    notification = {:protocol_failed, reason}
+    {[notify_parent: notification, terminate: {:shutdown, notification}], state}
+  end
+
+  defp handle_event(_event, _ctx, state), do: {[], state}
+
+  @impl true
+  def handle_terminate_request(_ctx, state) do
+    unsubscribe(state)
+    close_client(state)
+    {[terminate: :normal], state}
+  end
+
+  defp consume_or_queue(event, %{playing?: false} = state) do
+    {[], update_in(state.queued_events, &(&1 ++ [event]))}
+  end
+
+  defp consume_or_queue(event, state), do: consume_event(event, state)
+
+  defp consume_queued_events(state) do
+    events = state.queued_events
+    state = %{state | queued_events: []}
+
+    Enum.reduce(events, {[], state}, fn event, {actions, state} ->
+      {next_actions, state} = consume_event(event, state)
+      {actions ++ next_actions, state}
+    end)
+  end
+
+  defp consume_event({:object, object}, %{pending_object: nil} = state) do
+    case start_object?(object, state) do
+      {true, state} -> {[], %{state | pending_object: object}}
+      {false, state} -> {[], state}
+    end
+  end
+
+  defp consume_event({:object, object}, %{pending_object: previous} = state) do
+    group_end? =
+      previous.group_id != object.group_id or previous.status in [:end_of_group, :end_of_track]
+
+    action = {:buffer, {:output, object_buffer(previous, group_end?)}}
+    {[action], %{state | pending_object: object}}
+  end
+
+  defp consume_event({:subscription_done, completion}, %{ended?: false} = state) do
+    buffer_actions =
+      case state.pending_object do
+        nil -> []
+        object -> [buffer: {:output, object_buffer(object, true)}]
+      end
+
+    notification = {:subscription_done, state.track, completion}
+
+    actions =
+      buffer_actions ++
+        [
+          notify_parent: notification,
+          end_of_stream: :output
+        ]
+
+    {actions, %{state | pending_object: nil, ended?: true}}
+  end
+
+  defp consume_event({:subscription_done, _completion}, state), do: {[], state}
+
+  defp object_buffer(object, group_end?) do
+    unit = %Unit{
+      group_end?: group_end?,
+      group_id: object.group_id,
+      subgroup_id: object.subgroup_id,
+      object_id: object.object_id,
+      publisher_priority: object.publisher_priority,
+      status: object.status
+    }
+
+    %Membrane.Buffer{payload: object.payload, metadata: %{moqx: unit}}
+  end
+
+  defp start_object?(_object, %{start_policy: :current} = state), do: {true, state}
+
+  defp start_object?(object, %{start_policy: :next_group, initial_group: nil} = state),
+    do: {false, %{state | initial_group: object.group_id}}
+
+  defp start_object?(object, %{start_policy: :next_group, initial_group: group} = state),
+    do: {object.group_id != group, state}
+
+  defp connect_options(state) do
+    [
+      protocol: state.protocol,
+      events_to: self(),
+      timeout: state.timeout,
+      connect_options: state.connect_options
+    ]
+    |> put_if_present(:authorization, state.authorization)
+    |> put_if_present(:transport, state.transport)
+  end
+
+  defp put_if_present(options, _key, nil), do: options
+  defp put_if_present(options, key, value), do: Keyword.put(options, key, value)
+
+  defp validate_connection_options(%{session: session}) when is_pid(session), do: :ok
+
+  defp validate_connection_options(%{endpoint: endpoint, protocol: protocol})
+       when (is_binary(endpoint) or is_struct(endpoint, URI)) and not is_nil(protocol),
+       do: :ok
+
+  defp validate_connection_options(_state),
+    do: {:error, :source_requires_session_or_endpoint_and_protocol}
+
+  defp start_subscription(%{session: session} = state) when is_pid(session) do
+    case Session.subscribe(session, state.track, state.subscription_options) do
+      {:ok, subscription} -> {:ok, nil, subscription}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp start_subscription(state) do
+    with {:ok, client} <- MOQX.connect(state.endpoint, connect_options(state)),
+         {:ok, subscription} <- MOQX.subscribe(client, state.track, state.subscription_options) do
+      {:ok, client, subscription}
+    end
+  end
+
+  defp unsubscribe(%{subscription: nil}), do: :ok
+
+  defp unsubscribe(%{session: session} = state) when is_pid(session) do
+    case Session.unsubscribe(session, state.subscription) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Membrane.Logger.warning("Failed to unsubscribe shared MOQX Source: #{inspect(reason)}")
+    end
+  catch
+    :exit, {:noproc, _call} -> :ok
+    :exit, {:normal, _call} -> :ok
+  end
+
+  defp unsubscribe(%{client: nil}), do: :ok
+
+  defp unsubscribe(state) do
+    case MOQX.unsubscribe(state.client, state.subscription) do
+      :ok ->
+        :ok
+
+      {:error, :unknown_subscription} ->
+        :ok
+
+      {:error, reason} ->
+        Membrane.Logger.warning("Failed to unsubscribe MOQX Source: #{inspect(reason)}")
+    end
+  end
+
+  defp close_client(%{session: session}) when is_pid(session), do: :ok
+  defp close_client(%{client: nil}), do: :ok
+
+  defp close_client(state) do
+    case MOQX.close(state.client) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Membrane.Logger.warning("Failed to close MOQX Source: #{inspect(reason)}")
+    end
+  end
+end
