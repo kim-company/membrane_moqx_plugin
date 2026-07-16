@@ -1,18 +1,10 @@
 defmodule Membrane.MOQX do
   @moduledoc """
-  Documentation for `Membrane.MOQX`.
+  Membrane integration for publishing and subscribing through MOQX.
+
+  Core Sources and Sinks exchange `Membrane.MOQX.Track` stream formats and
+  buffers carrying `Membrane.MOQX.Unit` metadata. Explicit track-adapter
+  filters translate concrete packaged formats at neighboring pipeline
+  boundaries.
   """
-
-  @doc """
-  Hello world.
-
-  ## Examples
-
-      iex> Membrane.MOQX.hello()
-      :world
-
-  """
-  def hello do
-    :world
-  end
 end

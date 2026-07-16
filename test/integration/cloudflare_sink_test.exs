@@ -7,6 +7,7 @@ defmodule Membrane.MOQX.Integration.CloudflareSinkTest do
   alias Membrane.{Buffer, Pad}
   alias Membrane.CMAF.Track
   alias Membrane.MOQX.{Sink, TestControlledSource}
+  alias Membrane.MOQX.TrackAdapter.ToTrack
   alias Membrane.Testing
 
   require Pad
@@ -37,6 +38,8 @@ defmodule Membrane.MOQX.Integration.CloudflareSinkTest do
 
     spec =
       child(:source, %TestControlledSource{stream_format: stream_format})
+      |> child(:adapter, %ToTrack{adapter: Membrane.MOQX.TrackAdapter.CMAF})
+      |> via_out(Pad.ref(:output, :video))
       |> via_in(Pad.ref(:input, :video),
         options: [
           track_name: "video.m4s",

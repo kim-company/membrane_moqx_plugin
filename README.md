@@ -10,8 +10,10 @@ Membrane elements and buffers.
 
 ## Status
 
-`Membrane.MOQX.Sink` publishes already-packaged CMAF tracks through the public
-`moqx` API. The Source remains under development.
+`Membrane.MOQX.Sink` publishes the canonical `Membrane.MOQX.Track` format
+through the public `moqx` API. Explicit format adapters convert CMAF and custom
+Membrane formats at neighboring pipeline boundaries. The Source remains under
+development.
 
 The first version will rely on Membrane's Toilet for pipeline overload handling.
 Protocol-neutral demand credits and bounded delivery inside `moqx` are deferred
@@ -19,10 +21,12 @@ until real pipeline usage demonstrates that they are needed.
 
 ## Media boundary
 
-MOQT transports media objects; it does not define raw codec framing. The first
-elements will carry CMAF initialization and media fragments without decoding or
-encoding H.264. Pipelines that need frame-level H.264 buffers should compose the
-appropriate Membrane CMAF/MP4 muxer or demuxer around this plugin.
+MOQT transports media objects; it does not define raw codec framing. Core
+Sources and Sinks exchange `Membrane.MOQX.Track` stream formats and buffers with
+`Membrane.MOQX.Unit` metadata. Format adapters translate that canonical
+contract without changing payload bytes. Pipelines that need frame-level H.264
+or AAC buffers compose the appropriate CMAF/MP4 muxer or demuxer outside the
+core elements.
 
 ## Elements
 
@@ -30,28 +34,33 @@ appropriate Membrane CMAF/MP4 muxer or demuxer around this plugin.
   and converts received MOQ objects and lifecycle events into Membrane output
   (planned).
 - `Membrane.MOQX.Sink` advertises a namespace and a retained full catalog. Each
-  requested input pad is one already-packaged logical track. The Sink assigns
-  MOQ coordinates and finishes the namespace publication when it terminates.
+  requested input pad accepts one canonical `Membrane.MOQX.Track`. The Sink
+  assigns MOQ coordinates and finishes the namespace publication when it
+  terminates.
+- `Membrane.MOQX.TrackAdapter.ToTrack` and `FromTrack` are explicit filters for
+  converting concrete Membrane formats to and from the canonical contract.
 
 Authorization tokens remain explicit caller input and are passed to `moqx` as
 redacted `MOQX.Secret` values.
 
 ## Publishing CMAF
 
-The Sink accepts `Membrane.CMAF.Track` stream formats containing AAC or H.264.
-One input buffer becomes one MOQ object without changing its payload.
-`metadata.last_chunk?` controls segment boundaries; when absent, the buffer is
-treated as a complete segment.
+The built-in CMAF adapter supports AAC and H.264 tracks. `ToTrack` converts
+`Membrane.CMAF.Track` and CMAF buffer metadata into the canonical format before
+the Sink. One input buffer becomes one MOQ object without changing its payload.
+Absent `metadata.last_chunk?` means the buffer is a complete segment.
 
 ```elixir
 import Membrane.ChildrenSpec
 
-alias Membrane.MOQX.Sink
+alias Membrane.MOQX.{Sink, TrackAdapter}
 alias Membrane.Pad
 
 require Pad
 
 source
+|> child(:cmaf_to_moqx, %TrackAdapter.ToTrack{adapter: TrackAdapter.CMAF})
+|> via_out(Pad.ref(:output, :video))
 |> via_in(Pad.ref(:input, :video),
   options: [
     track_name: "video.m4s",
@@ -72,24 +81,20 @@ The Sink does not encode, mux, split, or inspect media samples.
 ### Custom track adapters
 
 Formats other than `Membrane.CMAF.Track` can implement the public
-`Membrane.MOQX.TrackAdapter` behaviour. `describe/2` returns a
-`Membrane.MOQX.TrackDescriptor`; `publication_unit/2` returns exactly one
-`Membrane.MOQX.PublicationUnit` with an unchanged binary payload. Select the
-module explicitly on the pad:
+`Membrane.MOQX.TrackAdapter` behaviour. Directional callbacks convert stream
+formats and buffers to or from `Membrane.MOQX.Track` and
+`Membrane.MOQX.Unit`. Select the module on an explicit neighboring filter:
 
 ```elixir
-via_in(Pad.ref(:input, :custom),
-  options: [
-    track_name: "custom.media",
-    adapter: MyApp.MOQXTrackAdapter
-  ]
-)
+child(:custom_to_moqx, %TrackAdapter.ToTrack{adapter: MyApp.MOQXTrackAdapter})
+|> via_out(Pad.ref(:output, :custom))
+|> via_in(Pad.ref(:input, :custom), options: [track_name: "custom.media"])
 ```
 
-Adapters describe packaging and publication boundaries only. The Sink remains
-the owner of MOQ coordinates, catalog revisions, MOQX operations, and
-lifecycle handling. Adapter selection is local to the pad; there is no global
-registry or Application-environment lookup.
+Adapters translate media descriptions and unit metadata only. Core Sources and
+Sinks remain the owners of subscriptions, publications, MOQ coordinates,
+catalog state, and lifecycle. Adapter selection is explicit in the children
+spec; there is no global registry or Application-environment lookup.
 
 ## Installation
 
@@ -108,11 +113,11 @@ end
 ## Development
 
 ```bash
-mix deps.get
-mix test
-mix format --check-formatted
-mix compile --warnings-as-errors
-mix credo --strict
+mise exec -- mix deps.get
+mise exec -- mix test
+mise exec -- mix format --check-formatted
+mise exec -- mix compile --warnings-as-errors
+mise exec -- mix credo --strict
 ```
 
 Hermetic element tests should use `MOQX.Testing.Transport`. Live Cloudflare and
@@ -125,7 +130,7 @@ fragmented H.264 MP4 fixture and select the integration test explicitly:
 
 ```bash
 MOQX_CMAF_FIXTURE=/tmp/input-fragmented.mp4 \
-  mix test --only integration test/integration/cloudflare_sink_test.exs
+  mise exec -- mix test --only integration test/integration/cloudflare_sink_test.exs
 ```
 
 It defaults to Cloudflare's public draft-14 relay. Override `MOQX_ENDPOINT` for

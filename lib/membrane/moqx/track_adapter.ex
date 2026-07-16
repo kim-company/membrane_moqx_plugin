@@ -1,107 +1,122 @@
 defmodule Membrane.MOQX.TrackAdapter do
   @moduledoc """
-  Adapts concrete Membrane stream formats to the stable MOQX track contract.
+  Adapts concrete Membrane formats to and from the canonical MOQX pad contract.
 
-  A custom adapter can be selected explicitly with the `:adapter` option.
-  Without an override, the stream-format struct is resolved to a built-in
-  adapter.
+  Adapters are used by the explicit `ToTrack` and `FromTrack` filters. Core
+  MOQX Sources and Sinks only exchange `Membrane.MOQX.Track` stream formats and
+  buffers carrying `Membrane.MOQX.Unit` metadata.
   """
 
-  alias Membrane.MOQX.{PublicationUnit, TrackDescriptor}
+  alias Membrane.MOQX.{Track, Unit}
 
-  @type describe_result :: {:ok, TrackDescriptor.t()} | {:error, term()}
+  @callback to_moqx_stream_format(stream_format :: struct(), options :: keyword()) ::
+              {:ok, Track.t(), adapter_state :: term()} | {:error, term()}
 
-  @callback describe(stream_format :: struct(), options :: keyword()) :: describe_result()
-  @callback publication_unit(
-              buffer :: Membrane.Buffer.t(),
-              descriptor :: TrackDescriptor.t()
-            ) :: {:ok, PublicationUnit.t()} | {:error, term()}
+  @callback to_moqx_buffer(Membrane.Buffer.t(), adapter_state :: term()) ::
+              {:ok, Membrane.Buffer.t(), adapter_state :: term()} | {:error, term()}
 
-  @spec describe(struct(), keyword()) ::
-          {:ok, module(), TrackDescriptor.t()} | {:error, term()}
-  def describe(stream_format, options \\ []) when is_struct(stream_format) do
-    with {:ok, adapter} <- resolve(stream_format, Keyword.get(options, :adapter)) do
-      case adapter.describe(stream_format, options) do
-        {:ok, %TrackDescriptor{} = descriptor} -> validate_descriptor(adapter, descriptor)
-        {:ok, invalid_descriptor} -> {:error, {:invalid_track_descriptor, invalid_descriptor}}
-        {:error, _reason} = error -> error
-        invalid_result -> {:error, {:invalid_track_descriptor_result, invalid_result}}
+  @callback from_moqx_stream_format(Track.t(), options :: keyword()) ::
+              {:ok, struct(), adapter_state :: term()} | {:error, term()}
+
+  @callback from_moqx_buffer(Membrane.Buffer.t(), adapter_state :: term()) ::
+              {:ok, Membrane.Buffer.t(), adapter_state :: term()} | {:error, term()}
+
+  @optional_callbacks to_moqx_stream_format: 2,
+                      to_moqx_buffer: 2,
+                      from_moqx_stream_format: 2,
+                      from_moqx_buffer: 2
+
+  @spec to_moqx_stream_format(module(), struct(), keyword()) ::
+          {:ok, Track.t(), term()} | {:error, term()}
+  def to_moqx_stream_format(adapter, stream_format, options \\ [])
+      when is_atom(adapter) and is_struct(stream_format) do
+    with :ok <- require_callbacks(adapter, [:to_moqx_stream_format, :to_moqx_buffer]),
+         result <- adapter.to_moqx_stream_format(stream_format, options) do
+      case result do
+        {:ok, %Track{} = track, adapter_state} ->
+          validate_adapted_track(track, adapter_state)
+
+        {:ok, invalid_track, _adapter_state} ->
+          {:error, {:invalid_adapted_track, invalid_track}}
+
+        {:error, _reason} = error ->
+          error
+
+        invalid_result ->
+          {:error, {:invalid_adapted_track_result, invalid_result}}
       end
     end
   end
 
-  @spec publication_unit(module(), Membrane.Buffer.t(), TrackDescriptor.t()) ::
-          {:ok, PublicationUnit.t()} | {:error, term()}
-  def publication_unit(adapter, %Membrane.Buffer{} = buffer, %TrackDescriptor{} = descriptor)
+  @spec to_moqx_buffer(module(), Membrane.Buffer.t(), term()) ::
+          {:ok, Membrane.Buffer.t(), term()} | {:error, term()}
+  def to_moqx_buffer(adapter, %Membrane.Buffer{} = buffer, adapter_state)
       when is_atom(adapter) do
-    case adapter.publication_unit(buffer, descriptor) do
-      {:ok, %PublicationUnit{} = unit} -> validate_publication_unit(unit)
-      {:ok, invalid_unit} -> {:error, {:invalid_publication_unit, invalid_unit}}
-      {:error, _reason} = error -> error
-      invalid_result -> {:error, {:invalid_publication_unit_result, invalid_result}}
+    with :ok <- require_callbacks(adapter, [:to_moqx_stream_format, :to_moqx_buffer]),
+         result <- adapter.to_moqx_buffer(buffer, adapter_state) do
+      validate_adapted_buffer(result)
     end
   end
 
-  defp validate_publication_unit(%PublicationUnit{} = unit) do
-    if is_binary(unit.payload) and is_boolean(unit.segment_end?) and
-         (is_boolean(unit.independent?) or is_nil(unit.independent?)) and
-         ((is_integer(unit.duration) and unit.duration >= 0) or is_nil(unit.duration)) do
-      {:ok, unit}
-    else
-      {:error, {:invalid_publication_unit, unit}}
+  @spec from_moqx_stream_format(module(), Track.t(), keyword()) ::
+          {:ok, struct(), term()} | {:error, term()}
+  def from_moqx_stream_format(adapter, %Track{} = track, options \\ []) when is_atom(adapter) do
+    with :ok <- require_callbacks(adapter, [:from_moqx_stream_format, :from_moqx_buffer]),
+         result <- adapter.from_moqx_stream_format(track, options) do
+      case result do
+        {:ok, stream_format, adapter_state} when is_struct(stream_format) ->
+          {:ok, stream_format, adapter_state}
+
+        {:ok, invalid_stream_format, _adapter_state} ->
+          {:error, {:invalid_adapted_stream_format, invalid_stream_format}}
+
+        {:error, _reason} = error ->
+          error
+
+        invalid_result ->
+          {:error, {:invalid_adapted_stream_format_result, invalid_result}}
+      end
     end
   end
 
-  defp validate_descriptor(adapter, %TrackDescriptor{} = descriptor) do
+  @spec from_moqx_buffer(module(), Membrane.Buffer.t(), term()) ::
+          {:ok, Membrane.Buffer.t(), term()} | {:error, term()}
+  def from_moqx_buffer(adapter, %Membrane.Buffer{} = buffer, adapter_state)
+      when is_atom(adapter) do
+    with :ok <- require_callbacks(adapter, [:from_moqx_stream_format, :from_moqx_buffer]),
+         result <- adapter.from_moqx_buffer(buffer, adapter_state) do
+      validate_adapted_buffer(result)
+    end
+  end
+
+  defp validate_adapted_buffer({:ok, %Membrane.Buffer{payload: payload} = buffer, adapter_state})
+       when is_binary(payload) do
+    case Unit.from_buffer(buffer) do
+      {:ok, %Unit{}} -> {:ok, buffer, adapter_state}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp validate_adapted_buffer({:ok, invalid_buffer, _adapter_state}),
+    do: {:error, {:invalid_adapted_buffer, invalid_buffer}}
+
+  defp validate_adapted_buffer({:error, _reason} = error), do: error
+
+  defp validate_adapted_buffer(invalid_result),
+    do: {:error, {:invalid_adapted_buffer_result, invalid_result}}
+
+  defp validate_adapted_track(track, adapter_state) do
+    case Track.validate(track) do
+      :ok -> {:ok, track, adapter_state}
+      {:error, _reason} -> {:error, {:invalid_adapted_track, track}}
+    end
+  end
+
+  defp require_callbacks(adapter, callbacks) do
     valid? =
-      valid_packaging?(descriptor.packaging) and
-        valid_content_types?(descriptor.content_types) and
-        valid_initialization?(descriptor.initialization) and
-        valid_codecs?(descriptor.codecs) and
-        valid_resolution?(descriptor.resolution) and
-        valid_optional_positive_integer?(descriptor.sample_rate) and
-        valid_optional_positive_integer?(descriptor.channels)
+      Code.ensure_loaded?(adapter) and
+        Enum.all?(callbacks, &function_exported?(adapter, &1, 2))
 
-    if valid? do
-      {:ok, adapter, descriptor}
-    else
-      {:error, {:invalid_track_descriptor, descriptor}}
-    end
-  end
-
-  defp valid_packaging?(packaging), do: is_atom(packaging) and not is_nil(packaging)
-
-  defp valid_content_types?(content_types) do
-    content_types != [] and Enum.all?(content_types, &(&1 in [:audio, :video]))
-  end
-
-  defp valid_initialization?(initialization),
-    do: is_binary(initialization) or is_nil(initialization)
-
-  defp valid_codecs?(codecs), do: codecs != [] and Enum.all?(codecs, &is_binary/1)
-
-  defp valid_resolution?(nil), do: true
-
-  defp valid_resolution?({width, height}) do
-    is_integer(width) and width >= 0 and is_integer(height) and height >= 0
-  end
-
-  defp valid_resolution?(_resolution), do: false
-
-  defp valid_optional_positive_integer?(nil), do: true
-  defp valid_optional_positive_integer?(value), do: is_integer(value) and value > 0
-
-  defp resolve(%Membrane.CMAF.Track{}, nil), do: {:ok, Membrane.MOQX.TrackAdapter.CMAF}
-
-  defp resolve(stream_format, nil),
-    do: {:error, {:unsupported_stream_format, stream_format.__struct__}}
-
-  defp resolve(_stream_format, adapter) when is_atom(adapter) do
-    if function_exported?(adapter, :describe, 2) and
-         function_exported?(adapter, :publication_unit, 2) do
-      {:ok, adapter}
-    else
-      {:error, {:invalid_track_adapter, adapter}}
-    end
+    if valid?, do: :ok, else: {:error, {:invalid_track_adapter, adapter}}
   end
 end

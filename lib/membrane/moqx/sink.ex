@@ -1,26 +1,25 @@
 defmodule Membrane.MOQX.Sink do
   @moduledoc """
-  Publishes adapter-normalized media tracks through MOQX.
+  Publishes canonical `Membrane.MOQX.Track` streams through MOQX.
 
-  Each dynamic input pad represents one already-packaged logical track. The
-  selected `Membrane.MOQX.TrackAdapter` translates the pad's stream format and
-  buffers into the stable publication contract; this element owns MOQ
-  coordinates, catalog state, and the MOQX client.
+  Each dynamic input pad represents one already-packaged logical track.
+  Format-specific filters translate concrete Membrane formats into the stable
+  track and unit contract before this element; the Sink owns MOQ coordinates,
+  catalog state, and the MOQX client.
   """
 
   use Membrane.Sink
 
-  alias Membrane.MOQX.TrackAdapter
+  alias Membrane.MOQX.{Track, Unit}
 
   def_input_pad :input,
     availability: :on_request,
     flow_control: :auto,
-    accepted_format: _any,
+    accepted_format: %Track{},
     options: [
       track_name: [spec: binary(), required: true],
       init_track_name: [spec: binary() | nil, default: nil],
       retention: [spec: :live | :latest | :all, default: :live],
-      adapter: [spec: module() | nil, default: nil],
       language: [spec: binary() | nil, default: nil],
       render_group: [spec: non_neg_integer() | nil, default: nil],
       alt_group: [spec: non_neg_integer() | nil, default: nil]
@@ -70,8 +69,7 @@ defmodule Membrane.MOQX.Sink do
       :ok ->
         pad_state = %{
           options: ctx.pad_options,
-          adapter: nil,
-          descriptor: nil,
+          track: nil,
           init_track: nil,
           init_track_name: nil,
           media_track: nil,
@@ -95,7 +93,7 @@ defmodule Membrane.MOQX.Sink do
     state = %{state | pads: pads}
 
     cond do
-      is_nil(pad_state) or is_nil(pad_state.descriptor) ->
+      is_nil(pad_state) or is_nil(pad_state.track) ->
         {[], state}
 
       pad_state.ended? ->
@@ -117,7 +115,7 @@ defmodule Membrane.MOQX.Sink do
   def handle_end_of_stream(pad, _ctx, state) do
     pad_state = Map.fetch!(state.pads, pad)
 
-    if pad_state.descriptor && !pad_state.ended? do
+    if pad_state.track && !pad_state.ended? do
       case publish_end_of_track(state, pad_state) do
         :ok ->
           finish_track_eos(pad, pad_state, state)
@@ -131,42 +129,40 @@ defmodule Membrane.MOQX.Sink do
   end
 
   @impl true
-  def handle_stream_format(pad, stream_format, _ctx, state) do
+  def handle_stream_format(pad, %Track{} = stream_format, _ctx, state) do
     pad_state = Map.fetch!(state.pads, pad)
-    options = pad_state.options
 
-    case TrackAdapter.describe(stream_format, adapter: options.adapter) do
-      {:ok, adapter, descriptor} ->
+    case Track.validate(stream_format) do
+      :ok ->
         cond do
-          is_nil(pad_state.descriptor) ->
-            prepare_initial_track(pad, adapter, descriptor, state)
+          is_nil(pad_state.track) ->
+            prepare_initial_track(pad, stream_format, state)
 
-          descriptor == pad_state.descriptor ->
+          stream_format == pad_state.track ->
             {[], state}
 
           true ->
-            prepare_updated_track(pad, adapter, descriptor, state)
+            prepare_updated_track(pad, stream_format, state)
         end
 
       {:error, reason} ->
-        raise "failed to describe MOQX track: #{inspect(reason)}"
+        raise "invalid MOQX track stream format: #{inspect(reason)}"
     end
   end
 
-  defp prepare_initial_track(pad, adapter, descriptor, state) do
+  defp prepare_initial_track(pad, track, state) do
     pad_state = Map.fetch!(state.pads, pad)
     options = pad_state.options
 
     with {:ok, init_track, init_name} <-
-           prepare_initialization(state, init_track_name(options), descriptor),
+           prepare_initialization(state, init_track_name(options), track),
          {:ok, media_track} <-
            MOQX.add_track(state.client, state.publication, options.track_name,
              retention: options.retention
            ) do
       pad_state = %{
         pad_state
-        | adapter: adapter,
-          descriptor: descriptor,
+        | track: track,
           init_track: init_track,
           init_track_name: init_name,
           media_track: media_track
@@ -183,17 +179,16 @@ defmodule Membrane.MOQX.Sink do
     end
   end
 
-  defp prepare_updated_track(pad, adapter, descriptor, state) do
+  defp prepare_updated_track(pad, track, state) do
     pad_state = Map.fetch!(state.pads, pad)
     generation = pad_state.generation + 1
     init_name = init_track_name(pad_state.options) <> ".#{generation}"
 
-    case prepare_initialization(state, init_name, descriptor) do
+    case prepare_initialization(state, init_name, track) do
       {:ok, init_track, init_name} ->
         pad_state = %{
           pad_state
-          | adapter: adapter,
-            descriptor: descriptor,
+          | track: track,
             init_track: init_track,
             init_track_name: init_name,
             generation: generation
@@ -238,10 +233,10 @@ defmodule Membrane.MOQX.Sink do
     {:ok, nil, nil}
   end
 
-  defp prepare_initialization(state, name, descriptor) do
+  defp prepare_initialization(state, name, track) do
     with {:ok, init_track} <-
            MOQX.add_track(state.client, state.publication, name, retention: :latest),
-         :ok <- publish_initialization(state, init_track, descriptor) do
+         :ok <- publish_initialization(state, init_track, track) do
       {:ok, init_track, name}
     end
   end
@@ -250,19 +245,14 @@ defmodule Membrane.MOQX.Sink do
   def handle_buffer(pad, buffer, _ctx, state) do
     pad_state = Map.fetch!(state.pads, pad)
 
-    with {:ok, unit} <-
-           TrackAdapter.publication_unit(
-             pad_state.adapter,
-             buffer,
-             pad_state.descriptor
-           ),
+    with {:ok, unit} <- Unit.from_buffer(buffer),
          :ok <-
            MOQX.publish_object(state.client, pad_state.media_track, %MOQX.Object{
              group_id: pad_state.group_id,
              subgroup_id: 0,
              object_id: pad_state.object_id,
              publisher_priority: state.publisher_priority,
-             payload: unit.payload
+             payload: buffer.payload
            }) do
       pad_state = advance_coordinates(pad_state, unit.segment_end?)
       {[], put_in(state, [:pads, pad], pad_state)}
@@ -404,13 +394,13 @@ defmodule Membrane.MOQX.Sink do
     end
   end
 
-  defp publish_initialization(state, init_track, descriptor) do
+  defp publish_initialization(state, init_track, track) do
     MOQX.publish_object(state.client, init_track, %MOQX.Object{
       group_id: 0,
       subgroup_id: 0,
       object_id: 0,
       publisher_priority: state.publisher_priority,
-      payload: descriptor.initialization
+      payload: track.initialization
     })
   end
 
@@ -455,26 +445,26 @@ defmodule Membrane.MOQX.Sink do
   defp catalog_tracks(state) do
     state.pads
     |> Enum.filter(fn {_pad, pad_state} ->
-      not is_nil(pad_state.descriptor) and !pad_state.ended?
+      not is_nil(pad_state.track) and !pad_state.ended?
     end)
     |> Enum.sort_by(fn {_pad, pad_state} -> pad_state.options.track_name end)
     |> Enum.map(fn {_pad, pad_state} -> catalog_track(pad_state) end)
   end
 
   defp catalog_track(pad_state) do
-    descriptor = pad_state.descriptor
+    track = pad_state.track
     options = pad_state.options
 
     selection_params =
-      %{"codec" => List.first(descriptor.codecs)}
-      |> put_resolution(descriptor.resolution)
-      |> put_map_if_present("samplerate", descriptor.sample_rate)
-      |> put_map_if_present("channelConfig", descriptor.channels)
+      %{"codec" => List.first(track.codecs)}
+      |> put_resolution(track.resolution)
+      |> put_map_if_present("samplerate", track.sample_rate)
+      |> put_map_if_present("channelConfig", track.channels)
       |> put_map_if_present("lang", options.language)
 
     %{
       "name" => options.track_name,
-      "packaging" => Atom.to_string(descriptor.packaging),
+      "packaging" => Atom.to_string(track.packaging),
       "selectionParams" => selection_params
     }
     |> put_map_if_present("initTrack", pad_state.init_track_name)

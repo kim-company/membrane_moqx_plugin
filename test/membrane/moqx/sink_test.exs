@@ -8,19 +8,22 @@ defmodule Membrane.MOQX.TestPacketAdapter do
   @behaviour Membrane.MOQX.TrackAdapter
 
   @impl true
-  def describe(%Membrane.MOQX.TestPacketFormat{codec: codec}, _options) do
-    {:ok,
-     %Membrane.MOQX.TrackDescriptor{
-       packaging: :packet,
-       content_types: [:audio],
-       initialization: nil,
-       codecs: [codec]
-     }}
+  def to_moqx_stream_format(%Membrane.MOQX.TestPacketFormat{codec: codec}, _options) do
+    track =
+      %Membrane.MOQX.Track{
+        packaging: :packet,
+        content_types: [:audio],
+        initialization: nil,
+        codecs: [codec]
+      }
+
+    {:ok, track, track}
   end
 
   @impl true
-  def publication_unit(%Membrane.Buffer{payload: payload}, _descriptor) do
-    {:ok, %Membrane.MOQX.PublicationUnit{payload: payload, segment_end?: true}}
+  def to_moqx_buffer(%Membrane.Buffer{} = buffer, %Membrane.MOQX.Track{} = track) do
+    buffer = %{buffer | metadata: %{moqx: %Membrane.MOQX.Unit{segment_end?: true}}}
+    {:ok, buffer, track}
   end
 end
 
@@ -33,9 +36,64 @@ defmodule Membrane.MOQX.SinkTest do
   alias Membrane.{Buffer, Pad}
   alias Membrane.CMAF.Track
   alias Membrane.MOQX.{Sink, TestDynamicSource, TestRelay}
+  alias Membrane.MOQX.TrackAdapter.ToTrack
   alias Membrane.Testing
 
   require Pad
+
+  test "publishes the canonical MOQX track format without format-specific knowledge" do
+    namespace = ["live", "canonical"]
+    relay = TestRelay.start(namespace)
+
+    stream_format = %Membrane.MOQX.Track{
+      packaging: :custom,
+      content_types: [:audio],
+      initialization: nil,
+      codecs: ["custom.audio"]
+    }
+
+    buffer = %Buffer{
+      payload: "canonical-media",
+      metadata: %{moqx: %Membrane.MOQX.Unit{segment_end?: true}}
+    }
+
+    spec =
+      child(:source, %TestDynamicSource{stream_format: stream_format, buffer: buffer})
+      |> via_out(Pad.ref(:output, :canonical))
+      |> via_in(Pad.ref(:input, :canonical),
+        options: [track_name: "audio.custom", retention: :latest]
+      )
+      |> child(:sink, %Sink{
+        endpoint: relay.endpoint,
+        protocol: :cloudflare_draft_14,
+        namespace: namespace,
+        transport: TestRelay.transport(relay)
+      })
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:track_ready, Pad.ref(:input, :canonical), "audio.custom"}
+    )
+
+    assert {:ok, objects} = TestRelay.capture(relay, [".catalog", "audio.custom"])
+    assert objects["audio.custom"].payload == "canonical-media"
+
+    assert %{
+             "tracks" => [
+               %{
+                 "name" => "audio.custom",
+                 "packaging" => "custom",
+                 "selectionParams" => %{"codec" => "custom.audio"}
+               }
+             ]
+           } = JSON.decode!(objects[".catalog"].payload)
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
 
   test "publishes an unchanged H264 CMAF track through the public Sink" do
     namespace = ["live", "camera-1"]
@@ -57,6 +115,8 @@ defmodule Membrane.MOQX.SinkTest do
 
     spec =
       child(:source, %TestDynamicSource{stream_format: stream_format, buffer: buffer})
+      |> via_out(Pad.ref(:output, :video))
+      |> child(:adapter, %ToTrack{adapter: Membrane.MOQX.TrackAdapter.CMAF})
       |> via_out(Pad.ref(:output, :video))
       |> via_in(Pad.ref(:input, :video),
         options: [
@@ -159,6 +219,8 @@ defmodule Membrane.MOQX.SinkTest do
         output: Testing.Source.output_from_buffers(buffers),
         stream_format: stream_format
       })
+      |> child(:adapter, %ToTrack{adapter: Membrane.MOQX.TrackAdapter.CMAF})
+      |> via_out(Pad.ref(:output, :video))
       |> via_in(Pad.ref(:input, :video),
         options: [track_name: "video.m4s", retention: :all]
       )
@@ -234,6 +296,8 @@ defmodule Membrane.MOQX.SinkTest do
         output: {:ready, generator},
         stream_format: initial_format
       })
+      |> child(:adapter, %ToTrack{adapter: Membrane.MOQX.TrackAdapter.CMAF})
+      |> via_out(Pad.ref(:output, :video))
       |> via_in(Pad.ref(:input, :video),
         options: [
           track_name: "video.m4s",
@@ -306,6 +370,8 @@ defmodule Membrane.MOQX.SinkTest do
 
     late_pad_spec =
       child(:late_source, %Testing.Source{output: {:ready, generator}, stream_format: format})
+      |> child(:late_adapter, %ToTrack{adapter: Membrane.MOQX.TrackAdapter.CMAF})
+      |> via_out(Pad.ref(:output, :audio))
       |> via_in(Pad.ref(:input, :audio),
         options: [
           track_name: "audio.m4s",
@@ -361,10 +427,11 @@ defmodule Membrane.MOQX.SinkTest do
         buffer: %Buffer{payload: "custom-packet"}
       })
       |> via_out(Pad.ref(:output, :custom))
+      |> child(:custom_adapter, %ToTrack{adapter: Membrane.MOQX.TestPacketAdapter})
+      |> via_out(Pad.ref(:output, :custom))
       |> via_in(Pad.ref(:input, :custom),
         options: [
           track_name: "audio.packet",
-          adapter: Membrane.MOQX.TestPacketAdapter,
           retention: :latest
         ]
       )
@@ -490,6 +557,8 @@ defmodule Membrane.MOQX.SinkTest do
         stream_format: format,
         buffer: %Buffer{payload: "aac-cmaf"}
       })
+      |> via_out(Pad.ref(:output, pad_id))
+      |> child({:adapter, pad_id}, %ToTrack{adapter: Membrane.MOQX.TrackAdapter.CMAF})
       |> via_out(Pad.ref(:output, pad_id))
       |> via_in(Pad.ref(:input, pad_id), options: [track_name: "audio.m4s"])
       |> get_child(:sink)
