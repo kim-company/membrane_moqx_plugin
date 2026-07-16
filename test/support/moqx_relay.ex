@@ -5,7 +5,7 @@ defmodule Membrane.MOQX.TestRelay do
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
 
-  @timeout 1_000
+  @timeout 5_000
 
   defstruct [:task, :network, :endpoint]
 
@@ -72,6 +72,83 @@ defmodule Membrane.MOQX.TestRelay do
       {:relay_error, reason} -> {:error, reason}
     after
       @timeout -> {:error, :capture_timeout}
+    end
+  end
+
+  def subscribe(%__MODULE__{task: task}, track, options \\ []) do
+    send(task.pid, {:subscribe, self(), track, options})
+
+    receive do
+      {:subscription_result, result} -> result
+      {:relay_error, reason} -> {:error, reason}
+    after
+      @timeout -> {:error, :subscribe_timeout}
+    end
+  end
+
+  def request_subscription(%__MODULE__{task: task}, track, options \\ []) do
+    send(task.pid, {:request_subscription, self(), track, options})
+
+    receive do
+      {:subscription_sent, request_id} -> {:ok, request_id}
+      {:relay_error, reason} -> {:error, reason}
+    after
+      @timeout -> {:error, :subscription_request_timeout}
+    end
+  end
+
+  def await_subscription_result(%__MODULE__{task: task}, request_id) do
+    send(task.pid, {:await_subscription_result, self(), request_id})
+
+    receive do
+      {:subscription_result, result} -> result
+      {:relay_error, reason} -> {:error, reason}
+    after
+      @timeout -> {:error, :subscribe_timeout}
+    end
+  end
+
+  def await_subscription_results(%__MODULE__{task: task}, request_ids) do
+    send(task.pid, {:await_subscription_results, self(), request_ids})
+
+    receive do
+      {:subscription_results, results} -> {:ok, results}
+      {:relay_error, reason} -> {:error, reason}
+    after
+      @timeout -> {:error, :subscribe_timeout}
+    end
+  end
+
+  def cancel_pending_subscription(%__MODULE__{task: task}, request_id) do
+    send(task.pid, {:cancel_pending_subscription, self(), request_id})
+
+    receive do
+      :pending_subscription_cancelled -> :ok
+      {:relay_error, reason} -> {:error, reason}
+    after
+      @timeout -> {:error, :pending_unsubscribe_timeout}
+    end
+  end
+
+  def receive_subscription_objects(%__MODULE__{task: task}, count) do
+    send(task.pid, {:receive_subscription_objects, self(), count})
+
+    receive do
+      {:subscription_objects, objects} -> {:ok, objects}
+      {:relay_error, reason} -> {:error, reason}
+    after
+      @timeout -> {:error, :subscription_objects_timeout}
+    end
+  end
+
+  def unsubscribe(%__MODULE__{task: task}, request_id) do
+    send(task.pid, {:unsubscribe, self(), request_id})
+
+    receive do
+      :unsubscribed -> :ok
+      {:relay_error, reason} -> {:error, reason}
+    after
+      @timeout -> {:error, :unsubscribe_timeout}
     end
   end
 
@@ -208,6 +285,27 @@ defmodule Membrane.MOQX.TestRelay do
       {:capture_many, _caller, _track, _count} = message ->
         handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
 
+      {:subscribe, _caller, _track, _options} = message ->
+        handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
+
+      {:request_subscription, _caller, _track, _options} = message ->
+        handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
+
+      {:await_subscription_result, _caller, _request_id} = message ->
+        handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
+
+      {:await_subscription_results, _caller, _request_ids} = message ->
+        handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
+
+      {:cancel_pending_subscription, _caller, _request_id} = message ->
+        handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
+
+      {:receive_subscription_objects, _caller, _count} = message ->
+        handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
+
+      {:unsubscribe, _caller, _request_id} = message ->
+        handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
+
       {:cancel_publication, _caller, _error_code, _reason} = message ->
         handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
 
@@ -272,6 +370,198 @@ defmodule Membrane.MOQX.TestRelay do
       end
 
     relay_loop(ctx, conn, control, namespace, next_id + 2)
+  end
+
+  defp handle_relay_message(
+         {:subscribe, caller, track, options},
+         ctx,
+         conn,
+         control,
+         namespace,
+         request_id
+       ) do
+    subscribe =
+      struct!(
+        Messages.Subscribe,
+        Keyword.merge(
+          [request_id: request_id, track_namespace: namespace, track_name: track],
+          options
+        )
+      )
+
+    ctx =
+      with {:ok, _send, ctx} <- Transport.send_stream(ctx, control, Codec.encode(subscribe)),
+           {:ok, result, ctx} <- receive_subscription_result(ctx, control, request_id) do
+        send(caller, {:subscription_result, result})
+        ctx
+      else
+        {:error, reason, ctx} ->
+          send(caller, {:relay_error, reason})
+          ctx
+      end
+
+    relay_loop(ctx, conn, control, namespace, request_id + 2)
+  end
+
+  defp handle_relay_message(
+         {:request_subscription, caller, track, options},
+         ctx,
+         conn,
+         control,
+         namespace,
+         request_id
+       ) do
+    subscribe =
+      struct!(
+        Messages.Subscribe,
+        Keyword.merge(
+          [request_id: request_id, track_namespace: namespace, track_name: track],
+          options
+        )
+      )
+
+    ctx =
+      case Transport.send_stream(ctx, control, Codec.encode(subscribe)) do
+        {:ok, _send, ctx} ->
+          send(caller, {:subscription_sent, request_id})
+          ctx
+
+        {:error, reason, ctx} ->
+          send(caller, {:relay_error, reason})
+          ctx
+      end
+
+    relay_loop(ctx, conn, control, namespace, request_id + 2)
+  end
+
+  defp handle_relay_message(
+         {:await_subscription_result, caller, request_id},
+         ctx,
+         conn,
+         control,
+         namespace,
+         next_id
+       ) do
+    ctx =
+      case receive_subscription_result(ctx, control, request_id) do
+        {:ok, result, ctx} ->
+          send(caller, {:subscription_result, result})
+          ctx
+
+        {:error, reason, ctx} ->
+          send(caller, {:relay_error, reason})
+          ctx
+      end
+
+    relay_loop(ctx, conn, control, namespace, next_id)
+  end
+
+  defp handle_relay_message(
+         {:await_subscription_results, caller, request_ids},
+         ctx,
+         conn,
+         control,
+         namespace,
+         next_id
+       ) do
+    result =
+      Enum.reduce_while(request_ids, {:ok, %{}, ctx}, fn _request_id, {:ok, results, ctx} ->
+        case receive_subscription_result(ctx, control) do
+          {:ok, request_id, response, ctx} ->
+            {:cont, {:ok, Map.put(results, request_id, response), ctx}}
+
+          {:error, reason, ctx} ->
+            {:halt, {:error, reason, ctx}}
+        end
+      end)
+
+    ctx =
+      case result do
+        {:ok, results, ctx} ->
+          send(caller, {:subscription_results, results})
+          ctx
+
+        {:error, reason, ctx} ->
+          send(caller, {:relay_error, reason})
+          ctx
+      end
+
+    relay_loop(ctx, conn, control, namespace, next_id)
+  end
+
+  defp handle_relay_message(
+         {:cancel_pending_subscription, caller, request_id},
+         ctx,
+         conn,
+         control,
+         namespace,
+         next_id
+       ) do
+    ctx =
+      case Transport.send_stream(
+             ctx,
+             control,
+             Codec.encode(%Messages.Unsubscribe{request_id: request_id})
+           ) do
+        {:ok, _send, ctx} ->
+          send(caller, :pending_subscription_cancelled)
+          ctx
+
+        {:error, reason, ctx} ->
+          send(caller, {:relay_error, reason})
+          ctx
+      end
+
+    relay_loop(ctx, conn, control, namespace, next_id)
+  end
+
+  defp handle_relay_message(
+         {:receive_subscription_objects, caller, count},
+         ctx,
+         conn,
+         control,
+         namespace,
+         next_id
+       ) do
+    ctx =
+      case receive_objects(ctx, conn, count) do
+        {:ok, objects, ctx} ->
+          send(caller, {:subscription_objects, objects})
+          ctx
+
+        {:error, reason, ctx} ->
+          send(caller, {:relay_error, reason})
+          ctx
+      end
+
+    relay_loop(ctx, conn, control, namespace, next_id)
+  end
+
+  defp handle_relay_message(
+         {:unsubscribe, caller, request_id},
+         ctx,
+         conn,
+         control,
+         namespace,
+         next_id
+       ) do
+    ctx =
+      with {:ok, _send, ctx} <-
+             Transport.send_stream(
+               ctx,
+               control,
+               Codec.encode(%Messages.Unsubscribe{request_id: request_id})
+             ),
+           {:ok, ctx} <- receive_publish_done(ctx, control, request_id) do
+        send(caller, :unsubscribed)
+        ctx
+      else
+        {:error, reason, ctx} ->
+          send(caller, {:relay_error, reason})
+          ctx
+      end
+
+    relay_loop(ctx, conn, control, namespace, next_id)
   end
 
   defp handle_relay_message(
@@ -396,6 +686,31 @@ defmodule Membrane.MOQX.TestRelay do
       {:ok, ctx}
     else
       other -> {:error, {:unexpected_subscribe_response, other}}
+    end
+  end
+
+  defp receive_subscription_result(ctx, control, request_id) do
+    case receive_subscription_result(ctx, control) do
+      {:ok, ^request_id, result, ctx} -> {:ok, result, ctx}
+      other -> {:error, {:unexpected_subscribe_response, other}, ctx}
+    end
+  end
+
+  defp receive_subscription_result(ctx, control) do
+    with {:ok, type, payload, ctx} <- receive_control_frame(ctx, control),
+         {:ok, response} <- decode_subscribe_response(type, payload) do
+      result =
+        case response do
+          %Messages.SubscribeOk{request_id: request_id} ->
+            {:ok, request_id}
+
+          %Messages.SubscribeError{error_code: code, reason_phrase: reason} ->
+            {:error, %{code: code, reason: reason}}
+        end
+
+      {:ok, response.request_id, result, ctx}
+    else
+      other -> {:error, {:unexpected_subscribe_response, other}, ctx}
     end
   end
 

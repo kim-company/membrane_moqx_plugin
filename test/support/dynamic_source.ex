@@ -23,4 +23,14 @@ defmodule Membrane.MOQX.TestDynamicSource do
 
     {actions, state}
   end
+
+  @impl true
+  def handle_event(
+        pad,
+        %{__struct__: Membrane.MOQX.Event.TrackDemand} = event,
+        _ctx,
+        state
+      ) do
+    {[notify_parent: {:track_demand, pad, event}], state}
+  end
 end

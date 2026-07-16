@@ -115,6 +115,81 @@ Each corresponding buffer carries `%Membrane.MOQX.Unit{group_end?: boolean}`
 under `buffer.metadata.moqx`. The Sink assigns fresh MOQ coordinates; received
 coordinates on Source buffers remain available for observation and adapters.
 
+## Pull-based publishing
+
+Inbound subscriptions are accepted automatically by default. Set
+`inbound_subscriptions: :controlled` when the pipeline must authorize requests
+or provision tracks only after they are requested:
+
+```elixir
+child(:moqx_sink, %Membrane.MOQX.Sink{
+  endpoint: endpoint,
+  protocol: :cloudflare_draft_14,
+  namespace: ["my-service", "channel"],
+  inbound_subscriptions: :controlled,
+  subscription_decision_timeout: 5_000,
+  max_pending_subscriptions: 128
+})
+```
+
+The Sink notifies its parent with the unchanged, typed MOQX request:
+
+```elixir
+{:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+```
+
+The parent decides through a child notification:
+
+```elixir
+Membrane.Pipeline.notify_child(pipeline, :moqx_sink, {:accept_subscription, request})
+
+Membrane.Pipeline.notify_child(
+  pipeline,
+  :moqx_sink,
+  {:reject_subscription, request,
+   %MOQX.SubscriptionRejection{code: :unauthorized, reason: "not allowed"}}
+)
+```
+
+Acceptance and track readiness are independent. If the requested track is not
+registered yet, approval remains pending. The parent can create a producer and
+link one dynamic Sink pad whose `track_name` matches `request.track.track`.
+Once its canonical stream format arrives, the Sink registers the track and
+accepts every approved request waiting for it. Multiple subscribers therefore
+share one logical pad and producer.
+
+Pending unsubscribe, decision timeout, publication finish, and publication
+cancellation produce:
+
+```elixir
+{:subscription_cancelled, request, reason}
+```
+
+Invalid, stale, or failed parent decisions produce:
+
+```elixir
+{:subscription_decision_failed, request, reason}
+```
+
+Accepted subscription lifecycle notifications include an opaque identity and
+the current count for that track:
+
+```elixir
+{:subscriber_joined, track_name, identity, subscriber_count}
+{:subscriber_left, track_name, identity, subscriber_count}
+```
+
+In controlled mode the catalog and known initialization tracks are accepted
+automatically by default. Set `infrastructure_subscriptions: :controlled` to
+route those requests through the parent too.
+
+Set `track_demand_events: true` to emit
+`Membrane.MOQX.Event.TrackDemand` upstream on a media pad when its subscriber
+count crosses `0 -> 1` or `1 -> 0`. This event is an optional production
+optimization signal. Authorization and dynamic graph changes remain parent
+notification responsibilities, and the Sink never removes a pad merely
+because its count reaches zero.
+
 ## Installation
 
 Until the package is published to Hex, depend on the Git repository:

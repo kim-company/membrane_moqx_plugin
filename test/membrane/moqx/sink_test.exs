@@ -34,11 +34,523 @@ defmodule Membrane.MOQX.SinkTest do
 
   alias Membrane.{Buffer, Pad}
   alias Membrane.CMAF.Track
-  alias Membrane.MOQX.{Sink, TestDynamicSource, TestRelay}
+  alias Membrane.MOQX.{Sink, TestControlledSource, TestDynamicSource, TestRelay}
   alias Membrane.MOQX.TrackAdapter.ToTrack
   alias Membrane.Testing
 
   require Pad
+
+  test "surfaces and rejects a controlled subscription for an unknown track" do
+    namespace = ["live", "pull"]
+    relay = TestRelay.start(namespace)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :cloudflare_draft_14,
+            namespace: namespace,
+            transport: TestRelay.transport(relay),
+            inbound_subscriptions: :controlled
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+
+    subscriber = Task.async(fn -> TestRelay.subscribe(relay, "subtitles/it") end)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested,
+       %MOQX.PublicationSubscriptionRequest{
+         track: %MOQX.TrackRef{namespace: ^namespace, track: "subtitles/it"},
+         filter: %MOQX.SubscriptionFilter{type: :largest_object}
+       } = request}
+    )
+
+    rejection = %MOQX.SubscriptionRejection{code: :unauthorized, reason: "not allowed"}
+
+    assert :ok =
+             Testing.Pipeline.notify_child(
+               pipeline,
+               :sink,
+               {:reject_subscription, request, rejection}
+             )
+
+    assert {:error, %{code: 1, reason: "not allowed"}} = Task.await(subscriber)
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
+
+  test "accepts and tracks a controlled subscription for a ready track" do
+    namespace = ["live", "controlled-ready"]
+    relay = TestRelay.start(namespace)
+
+    stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
+
+    buffer = %Buffer{
+      payload: "WEBVTT\n\nReady",
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    spec =
+      child(:source, %TestControlledSource{stream_format: stream_format})
+      |> via_in(Pad.ref(:input, :subtitles),
+        options: [track_name: "subtitles/ready", retention: :live]
+      )
+      |> child(:sink, %Sink{
+        endpoint: relay.endpoint,
+        protocol: :cloudflare_draft_14,
+        namespace: namespace,
+        transport: TestRelay.transport(relay),
+        inbound_subscriptions: :controlled
+      })
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:track_ready, Pad.ref(:input, :subtitles), "subtitles/ready"}
+    )
+
+    subscriber = Task.async(fn -> TestRelay.subscribe(relay, "subtitles/ready") end)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+    )
+
+    assert :ok =
+             Testing.Pipeline.notify_child(pipeline, :sink, {:accept_subscription, request})
+
+    assert {:ok, request_id} = Task.await(subscriber)
+    request_handle = request.handle
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_joined, "subtitles/ready", ^request_handle, 1}
+    )
+
+    assert :ok = Testing.Pipeline.notify_child(pipeline, :source, {:publish, [buffer]})
+    assert {:ok, [object]} = TestRelay.receive_subscription_objects(relay, 1)
+    assert object.payload == buffer.payload
+
+    assert :ok = TestRelay.unsubscribe(relay, request_id)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_left, "subtitles/ready", ^request_handle, 0}
+    )
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
+
+  test "provisions an approved unknown track when its dynamic pad becomes ready" do
+    namespace = ["live", "pull-provision"]
+    relay = TestRelay.start(namespace)
+
+    sink = %Sink{
+      endpoint: relay.endpoint,
+      protocol: :cloudflare_draft_14,
+      namespace: namespace,
+      transport: TestRelay.transport(relay),
+      inbound_subscriptions: :controlled
+    }
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: child(:sink, sink))
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+
+    subscriber = Task.async(fn -> TestRelay.subscribe(relay, "subtitles/on-demand") end)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+    )
+
+    assert :ok =
+             Testing.Pipeline.notify_child(pipeline, :sink, {:accept_subscription, request})
+
+    stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
+
+    buffer = %Buffer{
+      payload: "WEBVTT\n\nOn demand",
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    track_spec =
+      child(:source, %TestDynamicSource{stream_format: stream_format, buffer: buffer})
+      |> via_out(Pad.ref(:output, :subtitles))
+      |> via_in(Pad.ref(:input, :subtitles),
+        options: [track_name: "subtitles/on-demand", retention: :latest]
+      )
+      |> get_child(:sink)
+
+    assert :ok = Testing.Pipeline.execute_actions(pipeline, spec: track_spec)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:track_ready, Pad.ref(:input, :subtitles), "subtitles/on-demand"}
+    )
+
+    assert {:ok, request_id} = Task.await(subscriber)
+    request_handle = request.handle
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_joined, "subtitles/on-demand", ^request_handle, 1}
+    )
+
+    assert {:ok, [object]} = TestRelay.receive_subscription_objects(relay, 1)
+    assert object.payload == buffer.payload
+
+    assert :ok = TestRelay.unsubscribe(relay, request_id)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
+
+  test "invalidates a controlled request cancelled while pending" do
+    namespace = ["live", "pending-cancel"]
+    relay = TestRelay.start(namespace)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :cloudflare_draft_14,
+            namespace: namespace,
+            transport: TestRelay.transport(relay),
+            inbound_subscriptions: :controlled
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    assert {:ok, request_id} = TestRelay.request_subscription(relay, "future")
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+    )
+
+    assert :ok = TestRelay.cancel_pending_subscription(relay, request_id)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_cancelled, ^request, :unsubscribed}
+    )
+
+    assert :ok =
+             Testing.Pipeline.notify_child(pipeline, :sink, {:accept_subscription, request})
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_decision_failed, ^request, :unknown_subscription_request}
+    )
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
+
+  test "surfaces decision timeout and invalidates the pending request" do
+    namespace = ["live", "decision-timeout"]
+    relay = TestRelay.start(namespace)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :cloudflare_draft_14,
+            namespace: namespace,
+            transport: TestRelay.transport(relay),
+            inbound_subscriptions: :controlled,
+            subscription_decision_timeout: 25
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    assert {:ok, request_id} = TestRelay.request_subscription(relay, "future")
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_cancelled, ^request, :decision_timeout}
+    )
+
+    assert {:error, %{code: 2, reason: "subscription decision timed out"}} =
+             TestRelay.await_subscription_result(relay, request_id)
+
+    assert :ok =
+             Testing.Pipeline.notify_child(pipeline, :sink, {:accept_subscription, request})
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_decision_failed, ^request, :unknown_subscription_request}
+    )
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
+
+  test "emits aggregate track demand events on subscriber boundary transitions" do
+    namespace = ["live", "track-demand"]
+    relay = TestRelay.start(namespace)
+
+    stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
+
+    buffer = %Buffer{
+      payload: "WEBVTT\n\nDemand",
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    spec =
+      child(:source, %TestDynamicSource{stream_format: stream_format, buffer: buffer})
+      |> via_out(Pad.ref(:output, :subtitles))
+      |> via_in(Pad.ref(:input, :subtitles),
+        options: [track_name: "subtitles/demand", retention: :latest]
+      )
+      |> child(:sink, %Sink{
+        endpoint: relay.endpoint,
+        protocol: :cloudflare_draft_14,
+        namespace: namespace,
+        transport: TestRelay.transport(relay),
+        track_demand_events: true
+      })
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:track_ready, Pad.ref(:input, :subtitles), "subtitles/demand"}
+    )
+
+    assert {:ok, %{"subtitles/demand" => _object}} =
+             TestRelay.capture(relay, ["subtitles/demand"])
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, Pad.ref(:output, :subtitles),
+       %{
+         __struct__: Membrane.MOQX.Event.TrackDemand,
+         subscriber_count: 1,
+         active?: true
+       }}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, Pad.ref(:output, :subtitles),
+       %{
+         __struct__: Membrane.MOQX.Event.TrackDemand,
+         subscriber_count: 0,
+         active?: false
+       }}
+    )
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
+
+  test "applies explicit infrastructure subscription policy" do
+    namespace = ["live", "infrastructure"]
+    relay = TestRelay.start(namespace)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :cloudflare_draft_14,
+            namespace: namespace,
+            transport: TestRelay.transport(relay),
+            inbound_subscriptions: :controlled
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    assert {:ok, request_id} = TestRelay.request_subscription(relay, ".catalog")
+    assert {:ok, ^request_id} = TestRelay.await_subscription_result(relay, request_id)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_joined, ".catalog", _identity, 1}
+    )
+
+    refute_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{}},
+      100
+    )
+
+    assert :ok = TestRelay.unsubscribe(relay, request_id)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+
+    controlled_relay = TestRelay.start(namespace)
+
+    controlled_pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: controlled_relay.endpoint,
+            protocol: :cloudflare_draft_14,
+            namespace: namespace,
+            transport: TestRelay.transport(controlled_relay),
+            inbound_subscriptions: :controlled,
+            infrastructure_subscriptions: :controlled
+          })
+      )
+
+    assert_pipeline_notified(controlled_pipeline, :sink, {:publication_ready, ^namespace})
+
+    assert {:ok, controlled_request_id} =
+             TestRelay.request_subscription(controlled_relay, ".catalog")
+
+    assert_pipeline_notified(
+      controlled_pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+    )
+
+    rejection = %MOQX.SubscriptionRejection{code: :unauthorized}
+
+    assert :ok =
+             Testing.Pipeline.notify_child(
+               controlled_pipeline,
+               :sink,
+               {:reject_subscription, request, rejection}
+             )
+
+    assert {:error, %{code: 1}} =
+             TestRelay.await_subscription_result(controlled_relay, controlled_request_id)
+
+    assert :ok = Testing.Pipeline.terminate(controlled_pipeline)
+    assert :ok = TestRelay.await_shutdown(controlled_relay)
+  end
+
+  test "coalesces multiple approved requests onto one dynamically provisioned track" do
+    namespace = ["live", "coalesced"]
+    relay = TestRelay.start(namespace)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :cloudflare_draft_14,
+            namespace: namespace,
+            transport: TestRelay.transport(relay),
+            inbound_subscriptions: :controlled
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    assert {:ok, first_id} = TestRelay.request_subscription(relay, "shared")
+    assert {:ok, second_id} = TestRelay.request_subscription(relay, "shared")
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = first_request}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = second_request}
+    )
+
+    assert :ok =
+             Testing.Pipeline.notify_child(
+               pipeline,
+               :sink,
+               {:accept_subscription, first_request}
+             )
+
+    assert :ok =
+             Testing.Pipeline.notify_child(
+               pipeline,
+               :sink,
+               {:accept_subscription, second_request}
+             )
+
+    stream_format = %Membrane.MOQX.Track{packaging: "opaque", initialization: nil}
+
+    buffer = %Buffer{
+      payload: "one producer",
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    track_spec =
+      child(:source, %TestDynamicSource{stream_format: stream_format, buffer: buffer})
+      |> via_out(Pad.ref(:output, :shared))
+      |> via_in(Pad.ref(:input, :shared), options: [track_name: "shared", retention: :latest])
+      |> get_child(:sink)
+
+    assert :ok = Testing.Pipeline.execute_actions(pipeline, spec: track_spec)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:track_ready, Pad.ref(:input, :shared), "shared"}
+    )
+
+    assert {:ok, results} = TestRelay.await_subscription_results(relay, [first_id, second_id])
+    assert results == %{first_id => {:ok, first_id}, second_id => {:ok, second_id}}
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_joined, "shared", first_identity, 1}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_joined, "shared", second_identity, 2}
+    )
+
+    assert MapSet.new([first_identity, second_identity]) ==
+             MapSet.new([first_request.handle, second_request.handle])
+
+    assert {:ok, objects} = TestRelay.receive_subscription_objects(relay, 2)
+    assert Enum.map(objects, & &1.payload) == [buffer.payload, buffer.payload]
+
+    assert :ok = TestRelay.unsubscribe(relay, first_id)
+    assert_pipeline_notified(pipeline, :sink, {:subscriber_left, "shared", _identity, 1})
+
+    assert :ok = TestRelay.unsubscribe(relay, second_id)
+    assert_pipeline_notified(pipeline, :sink, {:subscriber_left, "shared", _identity, 0})
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
 
   test "publishes a generic subtitle track without audio or video assumptions" do
     namespace = ["live", "subtitles"]
@@ -171,8 +683,8 @@ defmodule Membrane.MOQX.SinkTest do
     assert {media.group_id, media.object_id, media.payload} ==
              {0, 0, "unchanged-cmaf-segment"}
 
-    assert_pipeline_notified(pipeline, :sink, {:subscriber_joined, "video.m4s", 5})
-    assert_pipeline_notified(pipeline, :sink, {:subscriber_left, "video.m4s", 5})
+    assert_pipeline_notified(pipeline, :sink, {:subscriber_joined, "video.m4s", 5, 1})
+    assert_pipeline_notified(pipeline, :sink, {:subscriber_left, "video.m4s", 5, 0})
 
     :ok =
       Testing.Pipeline.execute_actions(

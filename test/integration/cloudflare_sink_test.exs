@@ -113,7 +113,7 @@ defmodule Membrane.MOQX.Integration.CloudflareSinkTest do
       assert_pipeline_notified(
         pipeline,
         :sink,
-        {:subscriber_joined, "video.m4s", _request_id},
+        {:subscriber_joined, "video.m4s", _request_id, 1},
         @timeout
       )
 
