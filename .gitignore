@@ -21,4 +21,4 @@ erl_crash.dump
 
 # Ignore package tarball (built via "mix hex.build").
 membrane_moqx_plugin-*.tar
-
+.dexter*
