@@ -10,10 +10,11 @@ Membrane elements and buffers.
 
 ## Status
 
-`Membrane.MOQX.Sink` publishes the canonical `Membrane.MOQX.Track` format
-through the public `moqx` API. Explicit format adapters convert CMAF and custom
-Membrane formats at neighboring pipeline boundaries. The Source remains under
-development.
+`Membrane.MOQX.Source` and `Membrane.MOQX.Sink` receive and publish the
+canonical `Membrane.MOQX.Track` format through the public `moqx` API. Explicit
+format adapters convert CMAF and custom Membrane formats at neighboring
+pipeline boundaries. `Membrane.MOQX.CatalogSource` adds catalog discovery and
+pipeline-controlled dynamic track attachment over one shared MOQX session.
 
 The first version will rely on Membrane's Toilet for pipeline overload handling.
 Protocol-neutral demand credits and bounded delivery inside `moqx` are deferred
@@ -33,9 +34,13 @@ appropriate CMAF/MP4 muxer or demuxer outside the core elements.
 
 ## Elements
 
-- `Membrane.MOQX.Source` connects to a relay, subscribes to a selected track,
-  and converts received MOQ objects and lifecycle events into Membrane output
-  (planned).
+- `Membrane.MOQX.Source` subscribes to exactly one selected track and emits its
+  payload bytes unchanged with received MOQ coordinates, status, and inferred
+  group boundaries in `Membrane.MOQX.Unit` metadata.
+- `Membrane.MOQX.CatalogSource` owns a shared relay session, reports available
+  tracks to its parent, and creates one internal `Source` only when the pipeline
+  links the corresponding dynamic output pad. A pipeline may also request an
+  unadvertised track by supplying its canonical stream format on that pad.
 - `Membrane.MOQX.Sink` advertises a namespace and a retained full catalog. Each
   requested input pad accepts one canonical `Membrane.MOQX.Track`. The Sink
   assigns MOQ coordinates and finishes the namespace publication when it
@@ -45,6 +50,37 @@ appropriate CMAF/MP4 muxer or demuxer outside the core elements.
 
 Authorization tokens remain explicit caller input and are passed to `moqx` as
 redacted `MOQX.Secret` values.
+
+## Subscribing
+
+Use `Membrane.MOQX.Source` when the track address and canonical format are
+already known:
+
+```elixir
+child(:source, %Membrane.MOQX.Source{
+  endpoint: "moqt://draft-14.cloudflare.mediaoverquic.com:443",
+  protocol: :cloudflare_draft_14,
+  track: %MOQX.TrackRef{
+    namespace: ["my-service", "camera-1"],
+    track: "events"
+  },
+  stream_format: %Membrane.MOQX.Track{
+    packaging: "application/example",
+    initialization: nil
+  }
+})
+```
+
+Use `Membrane.MOQX.CatalogSource` when the pipeline should discover possible
+tracks and decide which ones to attach. Catalog entries produce
+`{:track_available, %Membrane.MOQX.TrackOffer{}}` parent notifications; they do
+not modify the graph automatically. Linking an exact dynamic output pad starts
+its one-track subscription.
+
+Catalog membership is discovery, not admission. To request a track before it
+is advertised, link a dynamic output pad with `track` and `stream_format`
+options. This sends the subscription immediately and allows a remote
+pull-based publisher to provision the track on demand.
 
 ## Publishing CMAF
 
@@ -207,11 +243,11 @@ end
 ## Development
 
 ```bash
-mise exec -- mix deps.get
-mise exec -- mix test
-mise exec -- mix format --check-formatted
-mise exec -- mix compile --warnings-as-errors
-mise exec -- mix credo --strict
+mix deps.get
+mix test
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix credo --strict
 ```
 
 Hermetic element tests should use `MOQX.Testing.Transport`. Live Cloudflare and
@@ -219,12 +255,19 @@ Dockerized relay checks remain explicitly selected integration tests.
 
 ### Live Cloudflare validation
 
-The live Sink roundtrip is excluded from normal test runs. Give it a real
-fragmented H.264 MP4 fixture and select the integration test explicitly:
+Live relay tests are excluded from normal test runs. The Source test verifies
+an unadvertised subscription, controlled Sink provisioning, payload delivery,
+and EOS through Cloudflare:
+
+```bash
+mix test --only integration test/integration/cloudflare_source_test.exs
+```
+
+The Sink test uses a real fragmented H.264 MP4 fixture:
 
 ```bash
 MOQX_CMAF_FIXTURE=/tmp/input-fragmented.mp4 \
-  mise exec -- mix test --only integration test/integration/cloudflare_sink_test.exs
+  mix test --only integration test/integration/cloudflare_sink_test.exs
 ```
 
 It defaults to Cloudflare's public draft-14 relay. Override `MOQX_ENDPOINT` for
