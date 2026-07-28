@@ -5,13 +5,18 @@ defmodule Membrane.MOQX.CatalogSource do
   Catalog offers are parent notifications, not automatic links. Linking an
   exact output pad requests that track. Callers may also request an
   unadvertised track by supplying its canonical stream format in pad options.
+
+  The default catalog name is resolved only from the explicit protocol:
+  `catalog` for draft-16 and `.catalog` for Cloudflare draft-14. Draft-16
+  inline CMSF initialization is preserved in the offered stream format;
+  Cloudflare `initTrack` values retain their separate subscription path.
   """
 
   use Membrane.Bin
 
   import Membrane.ChildrenSpec
 
-  alias Membrane.MOQX.{Session, Source, Track, TrackOffer}
+  alias Membrane.MOQX.{ProtocolConventions, Session, Source, Track, TrackOffer}
 
   def_output_pad :output,
     availability: :on_request,
@@ -30,22 +35,27 @@ defmodule Membrane.MOQX.CatalogSource do
               timeout: [spec: pos_integer(), default: 5_000],
               connect_options: [spec: keyword(), default: []],
               transport: [spec: term(), default: nil],
-              catalog_track_name: [spec: binary(), default: ".catalog"]
+              catalog_track_name: [spec: binary() | nil, default: nil]
 
   @impl true
   def handle_init(_ctx, options) do
-    {[],
-     options
-     |> Map.from_struct()
-     |> Map.merge(%{
-       session: nil,
-       catalog_subscription: nil,
-       advertised: %{},
-       offers: %{},
-       init_subscriptions: %{},
-       initialization_cache: %{},
-       pads: %{}
-     })}
+    state =
+      options
+      |> Map.from_struct()
+      |> Map.update!(:catalog_track_name, fn override ->
+        ProtocolConventions.catalog_track_name(options.protocol, override)
+      end)
+      |> Map.merge(%{
+        session: nil,
+        catalog_subscription: nil,
+        advertised: %{},
+        offers: %{},
+        init_subscriptions: %{},
+        initialization_cache: %{},
+        pads: %{}
+      })
+
+    {[], state}
   end
 
   @impl true

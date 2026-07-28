@@ -16,11 +16,17 @@ defmodule Membrane.MOQX.Sink do
   Subscriber join/leave notifications include the track's current subscriber
   count. Optional `Membrane.MOQX.Event.TrackDemand` events carry only aggregate
   zero/nonzero demand transitions upstream on an established media pad.
+
+  Standard draft-16 publication waits for namespace and per-track readiness,
+  emits Moqtail-compatible inline-initialization catalogs, supports subgroup or
+  datagram delivery per pad, and refreshes its retained catalog for late
+  discovery. Cloudflare draft-14 preserves `.catalog`, separate initialization
+  tracks, and subgroup-only publication. Protocol selection is always explicit.
   """
 
   use Membrane.Sink
 
-  alias Membrane.MOQX.{Track, Unit}
+  alias Membrane.MOQX.{ProtocolConventions, Track, Unit}
 
   def_input_pad :input,
     availability: :on_request,
@@ -29,7 +35,8 @@ defmodule Membrane.MOQX.Sink do
     options: [
       track_name: [spec: binary(), required: true],
       init_track_name: [spec: binary() | nil, default: nil],
-      retention: [spec: :live | :latest | :all, default: :live]
+      retention: [spec: :live | :latest | :all, default: :live],
+      delivery: [spec: :subgroup | :datagram, default: :subgroup]
     ]
 
   def_options endpoint: [spec: binary() | URI.t(), required: true],
@@ -39,8 +46,9 @@ defmodule Membrane.MOQX.Sink do
               timeout: [spec: pos_integer(), default: 5_000],
               connect_options: [spec: keyword(), default: []],
               transport: [spec: term(), default: nil],
-              catalog_track_name: [spec: binary(), default: ".catalog"],
+              catalog_track_name: [spec: binary() | nil, default: nil],
               publisher_priority: [spec: 0..255, default: 127],
+              catalog_refresh_interval: [spec: pos_integer() | nil, default: 1_000],
               inbound_subscriptions: [
                 spec: :automatic | :controlled,
                 default: :automatic
@@ -58,16 +66,22 @@ defmodule Membrane.MOQX.Sink do
     state =
       options
       |> Map.from_struct()
+      |> Map.update!(:catalog_track_name, fn override ->
+        ProtocolConventions.catalog_track_name(options.protocol, override)
+      end)
       |> Map.merge(%{
         client: nil,
         publication: nil,
         catalog_track: nil,
+        catalog_ready?: false,
         catalog_revision: 0,
+        catalog_timer: nil,
         pads: %{},
         pending_subscription_requests: %{},
         joining_subscription_requests: %{},
         active_subscription_requests: %{},
-        subscriber_counts: %{}
+        subscriber_counts: %{},
+        readiness_subscriptions: MapSet.new()
       })
 
     {[], state}
@@ -95,6 +109,10 @@ defmodule Membrane.MOQX.Sink do
           init_track: nil,
           init_track_name: nil,
           media_track: nil,
+          ready?: false,
+          pending_notification: nil,
+          queued_buffers: [],
+          eos_pending?: false,
           generation: 0,
           group_id: 0,
           object_id: 0,
@@ -137,16 +155,21 @@ defmodule Membrane.MOQX.Sink do
   def handle_end_of_stream(pad, _ctx, state) do
     pad_state = Map.fetch!(state.pads, pad)
 
-    if pad_state.track && !pad_state.ended? do
-      case publish_end_of_track(state, pad_state) do
-        :ok ->
-          finish_track_eos(pad, pad_state, state)
+    cond do
+      is_nil(pad_state.track) or pad_state.ended? ->
+        {[], state}
 
-        {:error, reason} ->
-          raise "failed to publish MOQX end-of-track status: #{inspect(reason)}"
-      end
-    else
-      {[], state}
+      not pad_state.ready? ->
+        {[], put_in(state, [:pads, pad, :eos_pending?], true)}
+
+      true ->
+        case publish_end_of_track(state, pad_state) do
+          :ok ->
+            finish_track_eos(pad, pad_state, state)
+
+          {:error, reason} ->
+            raise "failed to publish MOQX end-of-track status: #{inspect(reason)}"
+        end
     end
   end
 
@@ -177,25 +200,33 @@ defmodule Membrane.MOQX.Sink do
     options = pad_state.options
 
     with {:ok, init_track, init_name} <-
-           prepare_initialization(state, init_track_name(options), track),
+           prepare_initialization(state, resolved_init_track_name(options, state), track),
          {:ok, media_track} <-
-           MOQX.add_track(state.client, state.publication, options.track_name,
-             retention: options.retention
+           MOQX.add_track(
+             state.client,
+             state.publication,
+             options.track_name,
+             ProtocolConventions.track_options(
+               state.protocol,
+               options.retention,
+               options.delivery
+             )
            ) do
       pad_state = %{
         pad_state
         | track: track,
           init_track: init_track,
           init_track_name: init_name,
-          media_track: media_track
+          media_track: media_track,
+          ready?: not ProtocolConventions.draft_16?(state.protocol),
+          pending_notification: {:track_ready, pad, options.track_name}
       }
 
-      publish_prepared_track(
-        pad,
-        pad_state,
-        {:track_ready, pad, options.track_name},
-        state
-      )
+      if pad_state.ready? do
+        publish_prepared_track(pad, pad_state, pad_state.pending_notification, state)
+      else
+        {[], put_in(state, [:pads, pad], pad_state)}
+      end
     else
       {:error, reason} -> raise "failed to prepare MOQX track: #{inspect(reason)}"
     end
@@ -204,7 +235,12 @@ defmodule Membrane.MOQX.Sink do
   defp prepare_updated_track(pad, track, state) do
     pad_state = Map.fetch!(state.pads, pad)
     generation = pad_state.generation + 1
-    init_name = init_track_name(pad_state.options) <> ".#{generation}"
+
+    init_name =
+      case resolved_init_track_name(pad_state.options, state) do
+        nil -> nil
+        name -> name <> ".#{generation}"
+      end
 
     case prepare_initialization(state, init_name, track) do
       {:ok, init_track, init_name} ->
@@ -213,15 +249,15 @@ defmodule Membrane.MOQX.Sink do
           | track: track,
             init_track: init_track,
             init_track_name: init_name,
-            generation: generation
+            generation: generation,
+            pending_notification: {:track_updated, pad, pad_state.options.track_name, generation}
         }
 
-        publish_prepared_track(
-          pad,
-          pad_state,
-          {:track_updated, pad, pad_state.options.track_name, generation},
-          state
-        )
+        if pad_state.ready? do
+          publish_prepared_track(pad, pad_state, pad_state.pending_notification, state)
+        else
+          {[], put_in(state, [:pads, pad], pad_state)}
+        end
 
       {:error, reason} ->
         raise "failed to update MOQX track: #{inspect(reason)}"
@@ -264,6 +300,11 @@ defmodule Membrane.MOQX.Sink do
     {:ok, nil, nil}
   end
 
+  defp prepare_initialization(state, _name, _track)
+       when state.protocol in [:draft_16, MOQX.Protocol.Draft16] do
+    {:ok, nil, nil}
+  end
+
   defp prepare_initialization(state, name, track) do
     with {:ok, init_track} <-
            MOQX.add_track(state.client, state.publication, name, retention: :latest),
@@ -276,6 +317,15 @@ defmodule Membrane.MOQX.Sink do
   def handle_buffer(pad, buffer, _ctx, state) do
     pad_state = Map.fetch!(state.pads, pad)
 
+    if pad_state.ready? do
+      publish_buffer(pad, buffer, pad_state, state)
+    else
+      pad_state = update_in(pad_state.queued_buffers, &(&1 ++ [buffer]))
+      {[], put_in(state, [:pads, pad], pad_state)}
+    end
+  end
+
+  defp publish_buffer(pad, buffer, pad_state, state) do
     with {:ok, unit} <- Unit.from_buffer(buffer),
          :ok <-
            MOQX.publish_object(state.client, pad_state.media_track, %MOQX.Object{
@@ -283,6 +333,7 @@ defmodule Membrane.MOQX.Sink do
              subgroup_id: 0,
              object_id: pad_state.object_id,
              publisher_priority: state.publisher_priority,
+             end_of_group?: unit.group_end?,
              payload: buffer.payload
            }) do
       pad_state = advance_coordinates(pad_state, unit.group_end?)
@@ -349,18 +400,22 @@ defmodule Membrane.MOQX.Sink do
         _ctx,
         %{client: client, publication: publication} = state
       ) do
-    case MOQX.add_track(client, publication, state.catalog_track_name, retention: :latest) do
+    options =
+      ProtocolConventions.track_options(state.protocol, :latest, :subgroup)
+
+    case MOQX.add_track(client, publication, state.catalog_track_name, options) do
       {:ok, catalog_track} ->
-        state = %{state | catalog_track: catalog_track}
+        state = %{
+          state
+          | catalog_track: catalog_track,
+            catalog_ready?: not ProtocolConventions.draft_16?(state.protocol)
+        }
 
-        {subscription_actions, state} =
-          accept_approved_subscriptions([state.catalog_track_name], state)
-
-        actions =
-          [setup: :complete, notify_parent: {:publication_ready, state.namespace}] ++
-            subscription_actions
-
-        {actions, state}
+        if state.catalog_ready? do
+          publication_became_ready(state)
+        else
+          {[], state}
+        end
 
       {:error, reason} ->
         raise "failed to register MOQX catalog track: #{inspect(reason)}"
@@ -405,23 +460,11 @@ defmodule Membrane.MOQX.Sink do
         _ctx,
         %{client: client} = state
       ) do
-    track_name = published_track_name(track)
-    {identity, state} = take_joining_subscription(state, track_name, request_id)
-    previous_count = Map.get(state.subscriber_counts, track_name, 0)
-    count = previous_count + 1
-
-    state =
-      state
-      |> put_in([:active_subscription_requests, request_id], identity)
-      |> put_in([:subscriber_counts, track_name], count)
-
-    notification = {:subscriber_joined, track_name, identity, count}
-
-    actions =
-      [notify_parent: notification] ++
-        track_demand_actions(state, track_name, previous_count, count)
-
-    {actions, state}
+    if ProtocolConventions.draft_16?(state.protocol) and published_track_pending?(track, state) do
+      published_track_became_ready(track, request_id, state)
+    else
+      subscriber_joined(track, request_id, state)
+    end
   end
 
   def handle_info(
@@ -430,24 +473,13 @@ defmodule Membrane.MOQX.Sink do
         _ctx,
         %{client: client} = state
       ) do
-    track_name = published_track_name(track)
-    {identity, active} = Map.pop(state.active_subscription_requests, request_id, request_id)
-    previous_count = Map.get(state.subscriber_counts, track_name, 1)
-    count = max(previous_count - 1, 0)
+    key = {track, request_id}
 
-    state = %{
-      state
-      | active_subscription_requests: active,
-        subscriber_counts: Map.put(state.subscriber_counts, track_name, count)
-    }
-
-    notification = {:subscriber_left, track_name, identity, count}
-
-    actions =
-      [notify_parent: notification] ++
-        track_demand_actions(state, track_name, previous_count, count)
-
-    {actions, state}
+    if MapSet.member?(state.readiness_subscriptions, key) do
+      {[], %{state | readiness_subscriptions: MapSet.delete(state.readiness_subscriptions, key)}}
+    else
+      subscriber_left(track, request_id, state)
+    end
   end
 
   def handle_info(
@@ -456,6 +488,15 @@ defmodule Membrane.MOQX.Sink do
         %{client: client, publication: publication} = state
       ) do
     terminate_after_event({:publication_failed, error}, state, :close)
+  end
+
+  def handle_info(
+        {:moqx, client, %MOQX.Event.PublicationTrackFailed{track: track, error: error}},
+        _ctx,
+        %{client: client} = state
+      ) do
+    notification = {:publication_track_failed, published_track_name(track), error}
+    terminate_after_event(notification, state, :close)
   end
 
   def handle_info(
@@ -482,10 +523,97 @@ defmodule Membrane.MOQX.Sink do
     terminate_after_event({:protocol_failed, reason}, state, :already_closed)
   end
 
+  def handle_info(:refresh_catalog, _ctx, state) do
+    state = %{state | catalog_timer: nil}
+
+    case publish_catalog(state) do
+      {:ok, state} -> {[], state}
+      {:error, reason} -> raise "failed to refresh MOQX catalog: #{inspect(reason)}"
+    end
+  end
+
   def handle_info(_message, _ctx, state), do: {[], state}
+
+  defp subscriber_joined(track, request_id, state) do
+    track_name = published_track_name(track)
+    {identity, state} = take_joining_subscription(state, track_name, request_id)
+    previous_count = Map.get(state.subscriber_counts, track_name, 0)
+    count = previous_count + 1
+
+    state =
+      state
+      |> put_in([:active_subscription_requests, request_id], identity)
+      |> put_in([:subscriber_counts, track_name], count)
+
+    notification = {:subscriber_joined, track_name, identity, count}
+
+    actions =
+      [notify_parent: notification] ++
+        track_demand_actions(state, track_name, previous_count, count)
+
+    {actions, state}
+  end
+
+  defp subscriber_left(track, request_id, state) do
+    track_name = published_track_name(track)
+    {identity, active} = Map.pop(state.active_subscription_requests, request_id, request_id)
+    previous_count = Map.get(state.subscriber_counts, track_name, 1)
+    count = max(previous_count - 1, 0)
+
+    state = %{
+      state
+      | active_subscription_requests: active,
+        subscriber_counts: Map.put(state.subscriber_counts, track_name, count)
+    }
+
+    notification = {:subscriber_left, track_name, identity, count}
+
+    actions =
+      [notify_parent: notification] ++
+        track_demand_actions(state, track_name, previous_count, count)
+
+    {actions, state}
+  end
+
+  defp published_track_became_ready(track, request_id, %{catalog_track: track} = state) do
+    state =
+      state
+      |> Map.put(:catalog_ready?, true)
+      |> remember_readiness_subscription(track, request_id)
+
+    publication_became_ready(state)
+  end
+
+  defp published_track_became_ready(track, request_id, state) do
+    state = remember_readiness_subscription(state, track, request_id)
+
+    case pad_for_published_track(state, track) do
+      nil ->
+        {[], state}
+
+      pad ->
+        pad_state =
+          state.pads
+          |> Map.fetch!(pad)
+          |> Map.put(:ready?, true)
+
+        state = put_in(state, [:pads, pad], pad_state)
+
+        {actions, state} =
+          publish_prepared_track(
+            pad,
+            pad_state,
+            pad_state.pending_notification,
+            state
+          )
+
+        flush_ready_pad(pad, actions, state)
+    end
+  end
 
   @impl true
   def handle_terminate_request(_ctx, state) do
+    cancel_catalog_refresh(state)
     finish_publication(state)
     close_client(state)
 
@@ -520,6 +648,70 @@ defmodule Membrane.MOQX.Sink do
     track
     |> MOQX.PublishedTrack.track_ref()
     |> Map.fetch!(:track)
+  end
+
+  defp publication_became_ready(state) do
+    {subscription_actions, state} =
+      accept_approved_subscriptions([state.catalog_track_name], state)
+
+    actions =
+      [setup: :complete, notify_parent: {:publication_ready, state.namespace}] ++
+        subscription_actions
+
+    {actions, state}
+  end
+
+  defp published_track_pending?(track, state) do
+    (track == state.catalog_track and not state.catalog_ready?) or
+      Enum.any?(state.pads, fn {_pad, pad_state} ->
+        pad_state.media_track == track and not pad_state.ready?
+      end)
+  end
+
+  defp remember_readiness_subscription(state, track, request_id) do
+    update_in(state.readiness_subscriptions, &MapSet.put(&1, {track, request_id}))
+  end
+
+  defp pad_for_published_track(state, track) do
+    Enum.find_value(state.pads, fn {pad, pad_state} ->
+      if pad_state.media_track == track, do: pad
+    end)
+  end
+
+  defp flush_ready_pad(pad, actions, state) do
+    pad_state = Map.fetch!(state.pads, pad)
+    queued_buffers = pad_state.queued_buffers
+    eos_pending? = pad_state.eos_pending?
+
+    state =
+      put_in(state, [:pads, pad], %{
+        pad_state
+        | queued_buffers: [],
+          eos_pending?: false,
+          pending_notification: nil
+      })
+
+    {actions, state} =
+      Enum.reduce(queued_buffers, {actions, state}, fn buffer, {actions, state} ->
+        pad_state = Map.fetch!(state.pads, pad)
+        {next_actions, state} = publish_buffer(pad, buffer, pad_state, state)
+        {actions ++ next_actions, state}
+      end)
+
+    if eos_pending? do
+      pad_state = Map.fetch!(state.pads, pad)
+
+      case publish_end_of_track(state, pad_state) do
+        :ok ->
+          {eos_actions, state} = finish_track_eos(pad, pad_state, state)
+          {actions ++ eos_actions, state}
+
+        {:error, reason} ->
+          raise "failed to publish queued MOQX end-of-track: #{inspect(reason)}"
+      end
+    else
+      {actions, state}
+    end
   end
 
   defp published_track_for_name(state, track_name) do
@@ -628,7 +820,7 @@ defmodule Membrane.MOQX.Sink do
   defp infrastructure_track_name?(state, track_name) do
     track_name == state.catalog_track_name or
       Enum.any?(state.pads, fn {_pad, pad_state} ->
-        init_track_name(pad_state.options) == track_name
+        resolved_init_track_name(pad_state.options, state) == track_name
       end)
   end
 
@@ -637,26 +829,55 @@ defmodule Membrane.MOQX.Sink do
 
   defp init_track_name(%{init_track_name: name}), do: name
 
+  defp resolved_init_track_name(_options, state)
+       when state.protocol in [:draft_16, MOQX.Protocol.Draft16],
+       do: nil
+
+  defp resolved_init_track_name(options, _state), do: init_track_name(options)
+
   defp validate_pad_track_names(options, state) do
     track_name = options.track_name
-    init_name = init_track_name(options)
+    init_name = resolved_init_track_name(options, state)
 
     media_names = Enum.map(state.pads, fn {_pad, pad_state} -> pad_state.options.track_name end)
 
     init_names =
-      Enum.map(state.pads, fn {_pad, pad_state} -> init_track_name(pad_state.options) end)
+      Enum.map(state.pads, fn {_pad, pad_state} ->
+        resolved_init_track_name(pad_state.options, state)
+      end)
 
+    with :ok <-
+           validate_media_track_name(
+             track_name,
+             state.catalog_track_name,
+             media_names,
+             init_names
+           ) do
+      validate_init_track_name(
+        init_name,
+        track_name,
+        state.catalog_track_name,
+        media_names,
+        init_names
+      )
+    end
+  end
+
+  defp validate_media_track_name(track_name, catalog_name, media_names, init_names) do
     cond do
-      track_name == state.catalog_track_name ->
-        {:error, {:reserved_track_name, track_name}}
+      track_name == catalog_name -> {:error, {:reserved_track_name, track_name}}
+      track_name in media_names -> {:error, {:duplicate_track_name, track_name}}
+      track_name in init_names -> {:error, {:track_name_conflicts_with_init_track, track_name}}
+      true -> :ok
+    end
+  end
 
-      track_name in media_names ->
-        {:error, {:duplicate_track_name, track_name}}
+  defp validate_init_track_name(nil, _track_name, _catalog_name, _media_names, _init_names),
+    do: :ok
 
-      track_name in init_names ->
-        {:error, {:track_name_conflicts_with_init_track, track_name}}
-
-      init_name == track_name or init_name == state.catalog_track_name or init_name in media_names ->
+  defp validate_init_track_name(init_name, track_name, catalog_name, media_names, init_names) do
+    cond do
+      init_name == track_name or init_name == catalog_name or init_name in media_names ->
         {:error, {:init_track_name_conflict, init_name}}
 
       init_name in init_names ->
@@ -690,28 +911,27 @@ defmodule Membrane.MOQX.Sink do
 
   defp publish_catalog(state) do
     payload =
-      JSON.encode!(%{
-        "version" => 1,
-        "streamingFormat" => 1,
-        "streamingFormatVersion" => "0.2",
-        "supportsDeltaUpdates" => false,
-        "commonTrackFields" => %{
-          "namespace" => Enum.join(state.namespace, "/")
-        },
-        "tracks" => catalog_tracks(state)
-      })
+      state.protocol
+      |> ProtocolConventions.catalog(state.namespace, catalog_tracks(state))
+      |> JSON.encode!()
 
     object = %MOQX.Object{
       group_id: state.catalog_revision,
       subgroup_id: 0,
       object_id: 0,
-      publisher_priority: state.publisher_priority,
+      publisher_priority:
+        ProtocolConventions.catalog_priority(state.protocol, state.publisher_priority),
+      end_of_group?: true,
       payload: payload
     }
 
     case MOQX.publish_object(state.client, state.catalog_track, object) do
-      :ok -> {:ok, %{state | catalog_revision: state.catalog_revision + 1}}
-      {:error, reason} -> {:error, reason}
+      :ok ->
+        state = %{state | catalog_revision: state.catalog_revision + 1}
+        {:ok, schedule_catalog_refresh(state)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -721,25 +941,25 @@ defmodule Membrane.MOQX.Sink do
       not is_nil(pad_state.track) and !pad_state.ended?
     end)
     |> Enum.sort_by(fn {_pad, pad_state} -> pad_state.options.track_name end)
-    |> Enum.map(fn {_pad, pad_state} -> catalog_track(pad_state) end)
+    |> Enum.map(fn {_pad, pad_state} ->
+      {pad_state.options.track_name, pad_state.init_track_name, pad_state.track}
+    end)
   end
 
-  defp catalog_track(pad_state) do
-    options = pad_state.options
-    track = pad_state.track
+  defp schedule_catalog_refresh(state) do
+    cancel_catalog_refresh(state)
 
-    track.catalog_fields
-    |> Map.put("name", options.track_name)
-    |> Map.put("packaging", track.packaging)
-    |> put_map_unless_empty("selectionParams", track.selection_params)
-    |> put_map_if_present("initTrack", pad_state.init_track_name)
+    if ProtocolConventions.draft_16?(state.protocol) and
+         is_integer(state.catalog_refresh_interval) do
+      ref = Process.send_after(self(), :refresh_catalog, state.catalog_refresh_interval)
+      %{state | catalog_timer: ref}
+    else
+      %{state | catalog_timer: nil}
+    end
   end
 
-  defp put_map_if_present(map, _key, nil), do: map
-  defp put_map_if_present(map, key, value), do: Map.put(map, key, value)
-
-  defp put_map_unless_empty(map, _key, value) when value == %{}, do: map
-  defp put_map_unless_empty(map, key, value), do: Map.put(map, key, value)
+  defp cancel_catalog_refresh(%{catalog_timer: nil}), do: :ok
+  defp cancel_catalog_refresh(%{catalog_timer: ref}), do: Process.cancel_timer(ref)
 
   defp advance_coordinates(pad_state, true) do
     %{pad_state | group_id: pad_state.group_id + 1, object_id: 0}
@@ -775,11 +995,13 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp terminate_after_event(notification, state, :close) do
+    cancel_catalog_refresh(state)
     close_client(state)
     {[notify_parent: notification, terminate: {:shutdown, notification}], state}
   end
 
   defp terminate_after_event(notification, state, :already_closed) do
+    cancel_catalog_refresh(state)
     {[notify_parent: notification, terminate: {:shutdown, notification}], state}
   end
 end

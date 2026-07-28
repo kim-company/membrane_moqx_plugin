@@ -3,9 +3,11 @@
 Membrane Framework Source and Sink elements for receiving and publishing
 arbitrary named object tracks through [`moqx`](https://github.com/dmorn/moqx).
 
-The initial integration targets Cloudflare's deployed MOQT draft-14 relays over
-native QUIC. `moqx` owns the transport and protocol lifecycle; this project
-adapts its typed subscriptions, publications, objects, and terminal events to
+The plugin supports both standard MOQT draft-16 (including Moqtail's current
+CMSF workflow) and Cloudflare's deployed draft-14 implementation over native
+QUIC. Protocol selection is always explicit. `moqx` owns transport,
+draft-specific wire/lifecycle state, typed events, subscriptions,
+publications, and object delivery; this project adapts those public values to
 Membrane elements and buffers.
 
 ## Status
@@ -51,6 +53,11 @@ appropriate CMAF/MP4 muxer or demuxer outside the core elements.
 Authorization tokens remain explicit caller input and are passed to `moqx` as
 redacted `MOQX.Secret` values.
 
+The default catalog track follows the selected protocol: `catalog` for
+`:draft_16` and `.catalog` for `:cloudflare_draft_14`. Set
+`catalog_track_name` explicitly to override either convention. Endpoints and
+failed negotiation never select a protocol or catalog schema implicitly.
+
 ## Subscribing
 
 Use `Membrane.MOQX.Source` when the track address and canonical format are
@@ -71,6 +78,27 @@ child(:source, %Membrane.MOQX.Source{
 })
 ```
 
+The same element subscribes through standard draft-16. MOQX subscription
+options are passed through unchanged:
+
+```elixir
+child(:source, %Membrane.MOQX.Source{
+  endpoint: "moqt://relay.moqtail.dev:443",
+  protocol: :draft_16,
+  track: %MOQX.TrackRef{
+    namespace: ["moqtail", "testsrc"],
+    track: "video"
+  },
+  stream_format: discovered_or_known_track,
+  subscription_options: [
+    start: :next_group,
+    priority: 127,
+    group_order: :ascending,
+    delivery_timeout: 5_000
+  ]
+})
+```
+
 Use `Membrane.MOQX.CatalogSource` when the pipeline should discover possible
 tracks and decide which ones to attach. Catalog entries produce
 `{:track_available, %Membrane.MOQX.TrackOffer{}}` parent notifications; they do
@@ -81,6 +109,11 @@ Catalog membership is discovery, not admission. To request a track before it
 is advertised, link a dynamic output pad with `track` and `stream_format`
 options. This sends the subscription immediately and allows a remote
 pull-based publisher to provision the track on demand.
+
+For draft-16 CMSF catalogs, decoded inline `initData` becomes
+`Membrane.MOQX.Track.initialization`; no initialization subscription is
+created. Cloudflare catalogs retain the separate `initTrack` subscription
+path.
 
 ## Publishing CMAF
 
@@ -115,7 +148,47 @@ source
 ```
 
 Compose an encoder and CMAF muxer upstream when starting from raw AAC or H.264.
-The Sink does not encode, mux, split, or inspect media samples.
+The Sink does not encode, mux, split, inspect, pace, or loop media samples.
+
+For Moqtail-compatible standard draft-16 publication, provide current CMSF
+metadata as top-level selection/catalog fields. Initialization stays inline in
+the catalog:
+
+```elixir
+stream_format = %Membrane.MOQX.Track{
+  packaging: "cmaf",
+  initialization: cmaf_initialization,
+  selection_params: %{
+    "codec" => "avc1.42C01F",
+    "width" => 640,
+    "height" => 360
+  },
+  catalog_fields: %{
+    "role" => "video",
+    "timescale" => 90_000,
+    "bitrate" => 800_000
+  }
+}
+
+source
+|> via_in(Pad.ref(:input, :video),
+  options: [
+    track_name: "video",
+    retention: :all,
+    delivery: :subgroup
+  ]
+)
+|> child(:moqx_sink, %Membrane.MOQX.Sink{
+  endpoint: "moqt://relay.moqtail.dev:443",
+  protocol: :draft_16,
+  namespace: ["my-service", "camera-1"],
+  catalog_refresh_interval: 1_000
+})
+```
+
+Set a pad's `delivery: :datagram` to publish draft-16 object datagrams.
+`:subgroup` is the default. Cloudflare draft-14 remains subgroup-only and
+rejects datagram publication through MOQX.
 
 ### Custom track adapters
 
@@ -194,6 +267,12 @@ Once its canonical stream format arrives, the Sink registers the track and
 accepts every approved request waiting for it. Multiple subscribers therefore
 share one logical pad and producer.
 
+For draft-16, the Sink waits for namespace readiness and each track's
+`PUBLISH_OK` readiness before publishing catalogs, initialization, or media.
+Publisher track readiness is not counted as a remote subscriber and does not
+emit `TrackDemand`. Actual accepted subscribers alone drive join/leave counts
+and zero/nonzero demand transitions.
+
 Pending unsubscribe, decision timeout, publication finish, and publication
 cancellation produce:
 
@@ -251,7 +330,7 @@ mix credo --strict
 ```
 
 Hermetic element tests should use `MOQX.Testing.Transport`. Live Cloudflare and
-Dockerized relay checks remain explicitly selected integration tests.
+Moqtail checks remain explicitly selected integration tests.
 
 ### Live Cloudflare validation
 
@@ -274,3 +353,41 @@ It defaults to Cloudflare's public draft-14 relay. Override `MOQX_ENDPOINT` for
 another relay. For a managed relay, set `MOQX_AUTHORIZATION_FILE` to a file
 containing the token; the test reads it into `MOQX.Secret` and never accepts the
 token itself as an environment value.
+
+### Live Moqtail draft-16 validation
+
+The public Source check reads Moqtail's current catalog, preserves inline CMAF
+initialization, dynamically attaches the offered H.264 track, and receives
+media:
+
+```bash
+mix test --include integration \
+  test/integration/moqtail_draft_16_test.exs:16
+```
+
+The publication check requires a fragmented H.264 MP4 and publishes a unique
+namespace through the Sink before subscribing back through MOQX:
+
+```bash
+MOQX_CMAF_FIXTURE=/tmp/input-fragmented.mp4 \
+  mix test --include integration \
+  test/integration/moqtail_draft_16_test.exs:69
+```
+
+Override `MOQX_DRAFT16_ENDPOINT` to use a pinned compatible relay.
+
+For the operator-run player smoke:
+
+1. Use a paced producer of fresh, monotonically timestamped CMAF fragments;
+   do not loop a static MP4 timeline through the Sink.
+2. Start the draft-16 Sink example and note its namespace.
+3. Open `https://player.moqtail.dev`, select
+   `moqt://relay.moqtail.dev:443`, and enter that namespace.
+4. Record catalog discovery, `Playing`, the decoded resolution, and advancing
+   playback.
+5. Terminate the Membrane pipeline and confirm the publication is withdrawn.
+
+Catalog refresh is enabled for draft-16 by default so a player attaching late
+can discover the current retained catalog. The refresh timer is cancelled on
+normal termination, publication failure/cancellation, protocol failure, and
+connection close. Set `catalog_refresh_interval: nil` to disable it.

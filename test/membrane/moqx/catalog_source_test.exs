@@ -5,10 +5,104 @@ defmodule Membrane.MOQX.CatalogSourceTest do
   import Membrane.Testing.Assertions
 
   alias Membrane.{Buffer, Pad}
-  alias Membrane.MOQX.{CatalogSource, TestPublisher, Track, TrackOffer, Unit}
+
+  alias Membrane.MOQX.{
+    CatalogSource,
+    TestDraft16Publisher,
+    TestPublisher,
+    Track,
+    TrackOffer,
+    Unit
+  }
+
   alias Membrane.Testing
 
   require Pad
+
+  test "uses the draft-16 catalog convention and preserves inline initialization" do
+    namespace = ["moqtail", "pipeline"]
+    media_ref = %MOQX.TrackRef{namespace: namespace, track: "video"}
+    initialization = "inline-cmaf-init"
+
+    catalog =
+      JSON.encode!(%{
+        "version" => 1,
+        "tracks" => [
+          %{
+            "name" => "video",
+            "role" => "video",
+            "packaging" => "cmaf",
+            "codec" => "avc1.42C01F",
+            "width" => 640,
+            "height" => 360,
+            "timescale" => 90_000,
+            "initData" => Base.encode64(initialization)
+          }
+        ]
+      })
+
+    publisher = TestDraft16Publisher.start(namespace, catalog, "video", "fragment")
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:source, %CatalogSource{
+            endpoint: publisher.endpoint,
+            protocol: :draft_16,
+            namespace: namespace,
+            transport: TestDraft16Publisher.transport(publisher)
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :source, :catalog_ready)
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_available,
+       %TrackOffer{
+         track_ref: ^media_ref,
+         stream_format:
+           %Track{
+             packaging: "cmaf",
+             initialization: ^initialization,
+             catalog_fields: %{
+               "role" => "video",
+               "codec" => "avc1.42C01F",
+               "width" => 640,
+               "height" => 360,
+               "timescale" => 90_000
+             }
+           } = stream_format
+       }}
+    )
+
+    pad = Pad.ref(:output, :video)
+
+    link =
+      get_child(:source)
+      |> via_out(pad, options: [track: media_ref])
+      |> child(:sink, %Testing.Sink{})
+
+    assert :ok = Testing.Pipeline.execute_actions(pipeline, spec: link)
+    assert_sink_stream_format(pipeline, :sink, ^stream_format)
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_source, ^media_ref, {:subscription_ready, ^media_ref}}
+    )
+
+    TestDraft16Publisher.publish_media(publisher)
+    assert_sink_buffer(pipeline, :sink, %Buffer{payload: "fragment"})
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestDraft16Publisher.await_shutdown(publisher)
+  end
 
   test "offers catalog tracks and subscribes only when the exact pad is linked" do
     namespace = ["live", "catalog-source"]

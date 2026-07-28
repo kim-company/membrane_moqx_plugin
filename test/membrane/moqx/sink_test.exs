@@ -34,11 +34,238 @@ defmodule Membrane.MOQX.SinkTest do
 
   alias Membrane.{Buffer, Pad}
   alias Membrane.CMAF.Track
-  alias Membrane.MOQX.{Sink, TestControlledSource, TestDynamicSource, TestRelay}
+
+  alias Membrane.MOQX.{
+    Sink,
+    TestControlledSource,
+    TestDraft16Relay,
+    TestDynamicSource,
+    TestRelay
+  }
+
   alias Membrane.MOQX.TrackAdapter.ToTrack
   alias Membrane.Testing
 
   require Pad
+
+  test "waits for draft-16 track readiness and publishes Moqtail catalogs without false demand" do
+    namespace = ["operator", "camera"]
+    relay = TestDraft16Relay.start(namespace, "video", :subgroup)
+
+    stream_format = %Membrane.MOQX.Track{
+      packaging: "cmaf",
+      initialization: "inline-init",
+      selection_params: %{
+        "codec" => "avc1.42C01F",
+        "width" => 640,
+        "height" => 360
+      },
+      catalog_fields: %{
+        "role" => "video",
+        "timescale" => 90_000,
+        "bitrate" => 800_000
+      }
+    }
+
+    buffer = %Buffer{
+      payload: "fragment",
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    spec =
+      child(:source, %TestDynamicSource{stream_format: stream_format, buffer: buffer})
+      |> via_out(Pad.ref(:output, :video))
+      |> via_in(Pad.ref(:input, :video),
+        options: [track_name: "video", retention: :all, delivery: :subgroup]
+      )
+      |> child(:sink, %Sink{
+        endpoint: relay.endpoint,
+        protocol: :draft_16,
+        namespace: namespace,
+        transport: TestDraft16Relay.transport(relay),
+        catalog_refresh_interval: 25,
+        track_demand_events: true
+      })
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert :ok = TestDraft16Relay.await_pending(relay, "catalog")
+
+    refute_receive {Testing.Pipeline, ^pipeline,
+                    {:handle_child_notification, {{:publication_ready, _namespace}, :sink}}}
+
+    TestDraft16Relay.ready(relay, "catalog")
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    refute_pipeline_notified(pipeline, :sink, {:subscriber_joined, "catalog", _, _})
+
+    assert :ok = TestDraft16Relay.await_pending(relay, "video")
+    refute_pipeline_notified(pipeline, :sink, {:track_ready, _, "video"})
+
+    TestDraft16Relay.ready(relay, "video")
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:track_ready, Pad.ref(:input, :video), "video"}
+    )
+
+    refute_pipeline_notified(pipeline, :sink, {:subscriber_joined, "video", _, _})
+
+    assert {:ok, capture} = TestDraft16Relay.capture(relay)
+
+    assert JSON.decode!(capture.catalog.payload) == %{
+             "version" => 1,
+             "tracks" => [
+               %{
+                 "name" => "video",
+                 "role" => "video",
+                 "packaging" => "cmaf",
+                 "codec" => "avc1.42C01F",
+                 "width" => 640,
+                 "height" => 360,
+                 "timescale" => 90_000,
+                 "bitrate" => 800_000,
+                 "initData" => Base.encode64("inline-init")
+               }
+             ]
+           }
+
+    assert capture.catalog.priority == 0
+    assert capture.media.payload == "fragment"
+    assert capture.media.priority == 127
+    assert capture.media.end_of_group?
+    assert capture.refresh.group_id > capture.catalog.group_id
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestDraft16Relay.await_shutdown(relay)
+  end
+
+  test "publishes a draft-16 pad as datagrams when explicitly selected" do
+    namespace = ["operator", "datagram"]
+    relay = TestDraft16Relay.start(namespace, "events", :datagram)
+
+    stream_format = %Membrane.MOQX.Track{
+      packaging: "chunk-per-object",
+      initialization: nil,
+      selection_params: %{"codec" => "json"},
+      catalog_fields: %{"role" => "timeline"}
+    }
+
+    buffer = %Buffer{
+      payload: ~s({"type":"tick"}),
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    spec =
+      child(:source, %TestDynamicSource{stream_format: stream_format, buffer: buffer})
+      |> via_out(Pad.ref(:output, :events))
+      |> via_in(Pad.ref(:input, :events),
+        options: [track_name: "events", delivery: :datagram]
+      )
+      |> child(:sink, %Sink{
+        endpoint: relay.endpoint,
+        protocol: :draft_16,
+        namespace: namespace,
+        transport: TestDraft16Relay.transport(relay),
+        catalog_refresh_interval: 25
+      })
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert :ok = TestDraft16Relay.await_pending(relay, "catalog")
+    TestDraft16Relay.ready(relay, "catalog")
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+
+    assert :ok = TestDraft16Relay.await_pending(relay, "events")
+    TestDraft16Relay.ready(relay, "events")
+    assert_pipeline_notified(pipeline, :sink, {:track_ready, _, "events"})
+
+    assert {:ok, capture} = TestDraft16Relay.capture(relay)
+    assert capture.media.payload == buffer.payload
+    assert capture.media.group_id == 0
+    assert capture.media.object_id == 0
+    assert capture.media.end_of_group?
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestDraft16Relay.await_shutdown(relay)
+  end
+
+  test "keeps draft-16 readiness separate from controlled subscriber demand" do
+    namespace = ["operator", "controlled"]
+    relay = TestDraft16Relay.start_controlled(namespace, "captions")
+    stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
+
+    spec =
+      child(:source, %TestControlledSource{stream_format: stream_format})
+      |> via_in(Pad.ref(:input, :captions), options: [track_name: "captions"])
+      |> child(:sink, %Sink{
+        endpoint: relay.endpoint,
+        protocol: :draft_16,
+        namespace: namespace,
+        transport: TestDraft16Relay.transport(relay),
+        catalog_refresh_interval: nil,
+        inbound_subscriptions: :controlled,
+        track_demand_events: true
+      })
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert :ok = TestDraft16Relay.await_pending(relay, "catalog")
+    TestDraft16Relay.ready(relay, "catalog")
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+
+    assert :ok = TestDraft16Relay.await_pending(relay, "captions")
+    TestDraft16Relay.ready(relay, "captions")
+    assert_pipeline_notified(pipeline, :sink, {:track_ready, _, "captions"})
+
+    refute_pipeline_notified(pipeline, :sink, {:subscriber_joined, "captions", _, _})
+    refute_pipeline_notified(pipeline, :source, {:track_demand, _, _})
+
+    subscriber = Task.async(fn -> TestDraft16Relay.subscribe(relay) end)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+    )
+
+    assert :ok =
+             Testing.Pipeline.notify_child(pipeline, :sink, {:accept_subscription, request})
+
+    assert :ok = Task.await(subscriber)
+    request_handle = request.handle
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_joined, "captions", ^request_handle, 1}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: true, subscriber_count: 1}}
+    )
+
+    assert :ok = TestDraft16Relay.unsubscribe(relay)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_left, "captions", ^request_handle, 0}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: false, subscriber_count: 0}}
+    )
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestDraft16Relay.await_shutdown(relay)
+  end
 
   test "surfaces and rejects a controlled subscription for an unknown track" do
     namespace = ["live", "pull"]
