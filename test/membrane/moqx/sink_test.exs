@@ -267,6 +267,87 @@ defmodule Membrane.MOQX.SinkTest do
     assert :ok = TestDraft16Relay.await_shutdown(relay)
   end
 
+  test "accepts a namespace-routed draft-16 track without sending PUBLISH" do
+    namespace = ["operator", "reactive"]
+    relay = TestDraft16Relay.start_reactive(namespace, "captions")
+    stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :draft_16,
+            namespace: namespace,
+            transport: TestDraft16Relay.transport(relay),
+            catalog_refresh_interval: nil,
+            inbound_subscriptions: :controlled,
+            track_demand_events: true
+          })
+      )
+
+    assert :ok = TestDraft16Relay.await_pending(relay, "catalog")
+    TestDraft16Relay.ready(relay, "catalog")
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+
+    subscriber = Task.async(fn -> TestDraft16Relay.subscribe(relay) end)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+    )
+
+    assert :ok =
+             Testing.Pipeline.notify_child(pipeline, :sink, {:accept_subscription, request})
+
+    link =
+      child(:source, %TestControlledSource{stream_format: stream_format})
+      |> via_in(Pad.ref(:input, :captions), options: [track_name: "captions"])
+      |> get_child(:sink)
+
+    assert :ok = Testing.Pipeline.execute_actions(pipeline, spec: link)
+    assert :ok = Task.await(subscriber)
+    request_handle = request.handle
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:track_ready, Pad.ref(:input, :captions), "captions"}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_joined, "captions", ^request_handle, 1}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: true, subscriber_count: 1}}
+    )
+
+    assert :ok = TestDraft16Relay.unsubscribe(relay)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_left, "captions", ^request_handle, 0}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: false, subscriber_count: 0}}
+    )
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestDraft16Relay.await_shutdown(relay)
+  end
+
   test "surfaces and rejects a controlled subscription for an unknown track" do
     namespace = ["live", "pull"]
     relay = TestRelay.start(namespace)

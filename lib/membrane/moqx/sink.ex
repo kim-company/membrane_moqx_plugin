@@ -199,36 +199,133 @@ defmodule Membrane.MOQX.Sink do
     pad_state = Map.fetch!(state.pads, pad)
     options = pad_state.options
 
-    with {:ok, init_track, init_name} <-
-           prepare_initialization(state, resolved_init_track_name(options, state), track),
-         {:ok, media_track} <-
-           MOQX.add_track(
-             state.client,
-             state.publication,
-             options.track_name,
-             ProtocolConventions.track_options(
-               state.protocol,
-               options.retention,
-               options.delivery
-             )
-           ) do
-      pad_state = %{
-        pad_state
-        | track: track,
-          init_track: init_track,
-          init_track_name: init_name,
-          media_track: media_track,
-          ready?: not ProtocolConventions.draft_16?(state.protocol),
-          pending_notification: {:track_ready, pad, options.track_name}
-      }
+    case prepare_initialization(state, resolved_init_track_name(options, state), track) do
+      {:ok, init_track, init_name} ->
+        register_initial_track(pad, pad_state, track, init_track, init_name, state)
 
-      if pad_state.ready? do
+      {:error, reason} ->
+        raise "failed to prepare MOQX track: #{inspect(reason)}"
+    end
+  end
+
+  defp register_initial_track(pad, pad_state, track, init_track, init_name, state) do
+    options = pad_state.options
+
+    track_options =
+      ProtocolConventions.track_options(
+        state.protocol,
+        options.retention,
+        options.delivery
+      )
+
+    case approved_reactive_request(state, options.track_name) do
+      nil ->
+        add_initial_track(pad, pad_state, track, init_track, init_name, track_options, state)
+
+      request ->
+        accept_initial_track(
+          pad,
+          pad_state,
+          track,
+          init_track,
+          init_name,
+          request,
+          track_options,
+          state
+        )
+    end
+  end
+
+  defp add_initial_track(pad, pad_state, track, init_track, init_name, track_options, state) do
+    options = pad_state.options
+
+    case MOQX.add_track(state.client, state.publication, options.track_name, track_options) do
+      {:ok, media_track} ->
+        ready? = not ProtocolConventions.draft_16?(state.protocol)
+
+        pad_state =
+          prepared_pad_state(
+            pad_state,
+            pad,
+            track,
+            init_track,
+            init_name,
+            media_track,
+            ready?
+          )
+
+        if ready? do
+          publish_prepared_track(pad, pad_state, pad_state.pending_notification, state)
+        else
+          {[], put_in(state, [:pads, pad], pad_state)}
+        end
+
+      {:error, reason} ->
+        raise "failed to prepare MOQX track: #{inspect(reason)}"
+    end
+  end
+
+  defp accept_initial_track(
+         pad,
+         pad_state,
+         track,
+         init_track,
+         init_name,
+         request,
+         track_options,
+         state
+       ) do
+    case MOQX.accept_subscription(state.client, request, track_options) do
+      {:ok, media_track} ->
+        state = mark_subscription_joining(request, state)
+
+        pad_state =
+          prepared_pad_state(
+            pad_state,
+            pad,
+            track,
+            init_track,
+            init_name,
+            media_track,
+            true
+          )
+
         publish_prepared_track(pad, pad_state, pad_state.pending_notification, state)
-      else
-        {[], put_in(state, [:pads, pad], pad_state)}
-      end
-    else
-      {:error, reason} -> raise "failed to prepare MOQX track: #{inspect(reason)}"
+
+      {:error, reason} ->
+        raise "failed to accept reactive MOQX track: #{inspect(reason)}"
+    end
+  end
+
+  defp prepared_pad_state(
+         pad_state,
+         pad,
+         track,
+         init_track,
+         init_name,
+         media_track,
+         ready?
+       ) do
+    %{
+      pad_state
+      | track: track,
+        init_track: init_track,
+        init_track_name: init_name,
+        media_track: media_track,
+        ready?: ready?,
+        pending_notification: {:track_ready, pad, pad_state.options.track_name}
+    }
+  end
+
+  defp approved_reactive_request(state, track_name) do
+    if ProtocolConventions.draft_16?(state.protocol) do
+      Enum.find_value(state.pending_subscription_requests, fn
+        {_handle, %{request: %{track: %{track: ^track_name}} = request, status: :approved}} ->
+          request
+
+        _entry ->
+          nil
+      end)
     end
   end
 
@@ -734,22 +831,23 @@ defmodule Membrane.MOQX.Sink do
   defp accept_subscription_request(request, published_track, state) do
     case MOQX.accept_subscription(state.client, request, published_track) do
       :ok ->
-        track_name = request.track.track
-
-        state =
-          state
-          |> update_in([:pending_subscription_requests], &Map.delete(&1, request.handle))
-          |> update_in([:joining_subscription_requests, track_name], fn
-            nil -> [request]
-            requests -> requests ++ [request]
-          end)
-
-        {[], state}
+        {[], mark_subscription_joining(request, state)}
 
       {:error, reason} ->
         notification = {:subscription_decision_failed, request, reason}
         {[notify_parent: notification], state}
     end
+  end
+
+  defp mark_subscription_joining(request, state) do
+    track_name = request.track.track
+
+    state
+    |> update_in([:pending_subscription_requests], &Map.delete(&1, request.handle))
+    |> update_in([:joining_subscription_requests, track_name], fn
+      nil -> [request]
+      requests -> requests ++ [request]
+    end)
   end
 
   defp accept_approved_subscriptions(track_names, state) do

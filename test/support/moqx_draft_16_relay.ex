@@ -17,6 +17,10 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     start_mode(namespace, media_track, :controlled)
   end
 
+  def start_reactive(namespace, media_track) do
+    start_mode(namespace, media_track, :reactive)
+  end
+
   defp start_mode(namespace, media_track, mode) do
     {:ok, network} = Support.start_network()
     parent = self()
@@ -125,13 +129,25 @@ defmodule Membrane.MOQX.TestDraft16Relay do
          {:ok, control, ctx} <- Transport.accept_stream(ctx, conn, [], @timeout),
          {:ok, ctx} <- setup(ctx, control, port),
          {:ok, ctx} <- accept_publication(ctx, control, namespace),
-         {:ok, ctx} <- ready_track(parent, ctx, control, 2, catalog_ref, 0),
-         {:ok, ctx} <- ready_track(parent, ctx, control, 4, media_ref, 1) do
-      case mode do
-        {:capture, delivery} -> capture_publication(parent, ctx, conn, delivery)
-        :controlled -> controlled_subscription(ctx, conn, control, media_ref)
-      end
+         {:ok, ctx} <- ready_track(parent, ctx, control, 2, catalog_ref, 0) do
+      serve_mode(parent, ctx, conn, control, media_ref, mode)
     end
+  end
+
+  defp serve_mode(parent, ctx, conn, control, media_ref, {:capture, delivery}) do
+    with {:ok, ctx} <- ready_track(parent, ctx, control, 4, media_ref, 1) do
+      capture_publication(parent, ctx, conn, delivery)
+    end
+  end
+
+  defp serve_mode(parent, ctx, conn, control, media_ref, :controlled) do
+    with {:ok, ctx} <- ready_track(parent, ctx, control, 4, media_ref, 1) do
+      controlled_subscription(ctx, conn, control, media_ref, 2)
+    end
+  end
+
+  defp serve_mode(_parent, ctx, conn, control, media_ref, :reactive) do
+    controlled_subscription(ctx, conn, control, media_ref, 1)
   end
 
   defp capture_publication(parent, ctx, conn, delivery) do
@@ -148,13 +164,13 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     end
   end
 
-  defp controlled_subscription(ctx, conn, control, media_ref) do
+  defp controlled_subscription(ctx, conn, control, media_ref, track_alias) do
     receive do
       {:subscribe, caller} ->
         subscribe = Codec.subscribe(1, media_ref, [])
 
         with {:ok, _send, ctx} <- Transport.send_stream(ctx, control, subscribe),
-             expected = Codec.subscribe_ok(1, 2, group_order: :ascending),
+             expected = Codec.subscribe_ok(1, track_alias, group_order: :ascending),
              {:ok, ^expected, ctx} <-
                Transport.recv_stream(ctx, control, byte_size(expected)) do
           send(caller, {:draft16_subscribed, self()})

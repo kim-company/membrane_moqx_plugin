@@ -67,71 +67,86 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
     assert :ok = Testing.Pipeline.terminate(pipeline)
   end
 
-  test "publishes canonical CMAF through Sink and receives it through Moqtail" do
-    fixture = System.fetch_env!("MOQX_CMAF_FIXTURE")
-    assert {:ok, initialization, [fragment | _rest]} = MOQX.CMAF.read_fragments(fixture)
-
+  test "accepts a namespace-routed subscription and publishes through Moqtail" do
     endpoint = draft_16_endpoint()
     namespace = ["membrane-moqx", "draft16-#{System.unique_integer([:positive])}"]
-    media_name = "video"
+    media_name = "captions"
+    payload = "WEBVTT\n\n00:00.000 --> 00:01.000\nhello from membrane_moqx_plugin\n"
 
     stream_format = %Track{
-      packaging: "cmaf",
-      initialization: initialization,
-      selection_params: %{
-        "codec" => "avc1.42C01F",
-        "width" => 640,
-        "height" => 360
-      },
-      catalog_fields: %{"role" => "video", "timescale" => 90_000}
+      packaging: "webvtt",
+      initialization: nil,
+      selection_params: %{"lang" => "en-US"},
+      catalog_fields: %{"role" => "captions"}
     }
 
-    spec =
-      child(:source, %TestControlledSource{stream_format: stream_format})
-      |> via_in(Pad.ref(:input, :video),
-        options: [track_name: media_name, retention: :all]
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: endpoint,
+            protocol: :draft_16,
+            namespace: namespace,
+            timeout: @timeout,
+            catalog_refresh_interval: 500,
+            inbound_subscriptions: :controlled,
+            track_demand_events: true
+          })
       )
-      |> child(:sink, %Sink{
-        endpoint: endpoint,
-        protocol: :draft_16,
-        namespace: namespace,
-        timeout: @timeout,
-        catalog_refresh_interval: 500
-      })
 
-    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
-
-    assert_pipeline_notified(
-      pipeline,
-      :sink,
-      {:track_ready, Pad.ref(:input, :video), ^media_name},
-      @timeout
-    )
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace}, @timeout)
 
     assert {:ok, subscriber} =
              MOQX.connect(endpoint, protocol: :draft_16, timeout: @timeout)
 
     try do
-      catalog_ref = %MOQX.TrackRef{namespace: namespace, track: "catalog"}
-      assert {:ok, catalog_subscription} = MOQX.subscribe(subscriber, catalog_ref)
+      media_ref = %MOQX.TrackRef{namespace: namespace, track: media_name}
+      subscription_task = Task.async(fn -> MOQX.subscribe(subscriber, media_ref) end)
 
-      assert_receive {:moqx, ^subscriber,
-                      %MOQX.Event.CatalogReceived{
-                        subscription: ^catalog_subscription,
-                        catalog: %MOQX.Catalog{
-                          format: :moqtail_cmsf,
-                          tracks: [
-                            %MOQX.Catalog.Track{
-                              name: ^media_name,
-                              init_data: ^initialization
-                            }
-                          ]
-                        }
-                      }},
+      assert_receive {Testing.Pipeline, ^pipeline,
+                      {:handle_child_notification,
+                       {{:subscription_requested,
+                         %MOQX.PublicationSubscriptionRequest{} = request}, :sink}}},
                      @timeout
 
-      media_ref = %MOQX.TrackRef{namespace: namespace, track: media_name}
-      assert {:ok, media_subscription} = MOQX.subscribe(subscriber, media_ref)
+      assert :ok =
+               Testing.Pipeline.notify_child(
+                 pipeline,
+                 :sink,
+                 {:accept_subscription, request}
+               )
+
+      link =
+        child(:source, %TestControlledSource{stream_format: stream_format})
+        |> via_in(Pad.ref(:input, :captions),
+          options: [track_name: media_name, retention: :all]
+        )
+        |> get_child(:sink)
+
+      assert :ok = Testing.Pipeline.execute_actions(pipeline, spec: link)
+      assert {:ok, media_subscription} = Task.await(subscription_task, @timeout)
+
+      assert_pipeline_notified(
+        pipeline,
+        :sink,
+        {:track_ready, Pad.ref(:input, :captions), ^media_name},
+        @timeout
+      )
+
+      assert_pipeline_notified(
+        pipeline,
+        :sink,
+        {:subscriber_joined, ^media_name, _identity, 1},
+        @timeout
+      )
+
+      assert_pipeline_notified(
+        pipeline,
+        :source,
+        {:track_demand, :output,
+         %Membrane.MOQX.Event.TrackDemand{active?: true, subscriber_count: 1}},
+        @timeout
+      )
 
       assert :ok =
                Testing.Pipeline.notify_child(
@@ -140,7 +155,7 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
                  {:publish,
                   [
                     %Buffer{
-                      payload: fragment,
+                      payload: payload,
                       metadata: %{moqx: %Unit{group_end?: true}}
                     }
                   ]}
@@ -150,7 +165,7 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
                       %MOQX.Event.ObjectReceived{
                         object: %MOQX.Object{
                           subscription: ^media_subscription,
-                          payload: ^fragment
+                          payload: ^payload
                         }
                       }},
                      @timeout
