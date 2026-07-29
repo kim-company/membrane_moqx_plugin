@@ -152,6 +152,17 @@ defmodule Membrane.MOQX.TestRelay do
     end
   end
 
+  def await_publisher_finish(%__MODULE__{task: task}, request_id) do
+    send(task.pid, {:await_publisher_finish, self(), request_id})
+
+    receive do
+      :publisher_finished_subscription -> :ok
+      {:relay_error, reason} -> {:error, reason}
+    after
+      @timeout -> {:error, :publisher_finish_timeout}
+    end
+  end
+
   def cancel_publication(%__MODULE__{task: task}, error_code, reason) do
     send(task.pid, {:cancel_publication, self(), error_code, reason})
 
@@ -304,6 +315,9 @@ defmodule Membrane.MOQX.TestRelay do
         handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
 
       {:unsubscribe, _caller, _request_id} = message ->
+        handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
+
+      {:await_publisher_finish, _caller, _request_id} = message ->
         handle_relay_message(message, ctx, conn, control, namespace, next_request_id)
 
       {:cancel_publication, _caller, _error_code, _reason} = message ->
@@ -557,6 +571,28 @@ defmodule Membrane.MOQX.TestRelay do
         ctx
       else
         {:error, reason, ctx} ->
+          send(caller, {:relay_error, reason})
+          ctx
+      end
+
+    relay_loop(ctx, conn, control, namespace, next_id)
+  end
+
+  defp handle_relay_message(
+         {:await_publisher_finish, caller, request_id},
+         ctx,
+         conn,
+         control,
+         namespace,
+         next_id
+       ) do
+    ctx =
+      case receive_publish_done(ctx, control, request_id) do
+        {:ok, ctx} ->
+          send(caller, :publisher_finished_subscription)
+          ctx
+
+        {:error, reason} ->
           send(caller, {:relay_error, reason})
           ctx
       end

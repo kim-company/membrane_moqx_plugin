@@ -26,4 +26,14 @@ defmodule Membrane.MOQX.TestControlledSource do
   def handle_parent_notification(:end_of_stream, _ctx, state) do
     {[end_of_stream: :output], state}
   end
+
+  @impl true
+  def handle_event(
+        pad,
+        %{__struct__: Membrane.MOQX.Event.TrackDemand} = event,
+        _ctx,
+        state
+      ) do
+    {[notify_parent: {:track_demand, pad, event}], state}
+  end
 end

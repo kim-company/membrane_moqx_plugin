@@ -4,6 +4,11 @@ defmodule Membrane.MOQX.Source do
 
   Payload bytes remain unchanged. Received MOQ coordinates, priority, status,
   and inferred group boundaries are stored in Membrane.MOQX.Unit metadata.
+
+  `protocol` is explicit and never inferred from the endpoint.
+  `subscription_options` pass through to `MOQX.subscribe/3`, including
+  protocol-neutral start/filter, priority, group order, delivery timeout, and
+  extension parameters supported by the selected MOQX implementation.
   """
 
   use Membrane.Source
