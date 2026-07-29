@@ -16,6 +16,8 @@ defmodule Membrane.MOQX.Sink do
   Subscriber join/leave notifications include the track's current subscriber
   count. Optional `Membrane.MOQX.Event.TrackDemand` events carry only aggregate
   zero/nonzero demand transitions upstream on an established media pad.
+  A parent can finish one accepted subscriber without withdrawing the track by
+  sending `{:finish_subscription, request_handle, options}`.
 
   Standard draft-16 publication waits for namespace and per-track readiness,
   emits Moqtail-compatible inline-initialization catalogs, supports subgroup or
@@ -79,7 +81,7 @@ defmodule Membrane.MOQX.Sink do
         pads: %{},
         pending_subscription_requests: %{},
         joining_subscription_requests: %{},
-        active_subscription_requests: %{},
+        active_subscriptions: %{},
         subscriber_counts: %{},
         readiness_subscriptions: MapSet.new()
       })
@@ -140,13 +142,19 @@ defmodule Membrane.MOQX.Sink do
         {[notify_parent: {:track_removed, pad, pad_state.options.track_name}], state}
 
       true ->
-        case publish_catalog(state) do
-          {:ok, state} ->
-            actions = [notify_parent: {:track_removed, pad, pad_state.options.track_name}]
-            {actions, state}
-
+        with :ok <-
+               finish_track_subscriptions(
+                 state,
+                 pad_state.options.track_name,
+                 status: :track_ended,
+                 reason: "track removed"
+               ),
+             {:ok, state} <- publish_catalog(state) do
+          actions = [notify_parent: {:track_removed, pad, pad_state.options.track_name}]
+          {actions, state}
+        else
           {:error, reason} ->
-            raise "failed to publish MOQX catalog after pad removal: #{inspect(reason)}"
+            raise "failed to finish MOQX track removal: #{inspect(reason)}"
         end
     end
   end
@@ -276,8 +284,8 @@ defmodule Membrane.MOQX.Sink do
          state
        ) do
     case MOQX.accept_subscription(state.client, request, track_options) do
-      {:ok, media_track} ->
-        state = mark_subscription_joining(request, state)
+      {:ok, media_track, published_subscription} ->
+        state = mark_subscription_joining(request, published_subscription, state)
 
         pad_state =
           prepared_pad_state(
@@ -365,13 +373,19 @@ defmodule Membrane.MOQX.Sink do
     pad_state = %{pad_state | ended?: true}
     state = put_in(state, [:pads, pad], pad_state)
 
-    case publish_catalog(state) do
-      {:ok, state} ->
-        actions = [notify_parent: {:track_ended, pad, pad_state.options.track_name}]
-        {actions, state}
-
+    with :ok <-
+           finish_track_subscriptions(
+             state,
+             pad_state.options.track_name,
+             status: :track_ended,
+             reason: "track ended"
+           ),
+         {:ok, state} <- publish_catalog(state) do
+      actions = [notify_parent: {:track_ended, pad, pad_state.options.track_name}]
+      {actions, state}
+    else
       {:error, reason} ->
-        raise "failed to publish MOQX catalog after end of stream: #{inspect(reason)}"
+        raise "failed to finish MOQX track at end of stream: #{inspect(reason)}"
     end
   end
 
@@ -489,6 +503,31 @@ defmodule Membrane.MOQX.Sink do
     end
   end
 
+  def handle_parent_notification(
+        {:finish_subscription, request_handle, options},
+        _ctx,
+        state
+      )
+      when is_list(options) do
+    case find_active_subscription(state, request_handle) do
+      nil ->
+        notification =
+          {:subscription_finish_failed, request_handle, :unknown_published_subscription}
+
+        {[notify_parent: notification], state}
+
+      published_subscription ->
+        case MOQX.finish_subscription(state.client, published_subscription, options) do
+          :ok ->
+            {[], state}
+
+          {:error, reason} ->
+            notification = {:subscription_finish_failed, request_handle, reason}
+            {[notify_parent: notification], state}
+        end
+    end
+  end
+
   def handle_parent_notification(_notification, _ctx, state), do: {[], state}
 
   @impl true
@@ -553,20 +592,28 @@ defmodule Membrane.MOQX.Sink do
 
   def handle_info(
         {:moqx, client,
-         %MOQX.Event.PublicationSubscriberJoined{track: track, request_id: request_id}},
+         %MOQX.Event.PublicationSubscriberJoined{
+           track: track,
+           subscription: published_subscription,
+           request_id: request_id
+         }},
         _ctx,
         %{client: client} = state
       ) do
     if ProtocolConventions.draft_16?(state.protocol) and published_track_pending?(track, state) do
       published_track_became_ready(track, request_id, state)
     else
-      subscriber_joined(track, request_id, state)
+      subscriber_joined(track, published_subscription, request_id, state)
     end
   end
 
   def handle_info(
         {:moqx, client,
-         %MOQX.Event.PublicationSubscriberLeft{track: track, request_id: request_id}},
+         %MOQX.Event.PublicationSubscriberLeft{
+           track: track,
+           subscription: published_subscription,
+           request_id: request_id
+         }},
         _ctx,
         %{client: client} = state
       ) do
@@ -575,7 +622,7 @@ defmodule Membrane.MOQX.Sink do
     if MapSet.member?(state.readiness_subscriptions, key) do
       {[], %{state | readiness_subscriptions: MapSet.delete(state.readiness_subscriptions, key)}}
     else
-      subscriber_left(track, request_id, state)
+      subscriber_left(track, published_subscription, request_id, state)
     end
   end
 
@@ -631,15 +678,18 @@ defmodule Membrane.MOQX.Sink do
 
   def handle_info(_message, _ctx, state), do: {[], state}
 
-  defp subscriber_joined(track, request_id, state) do
+  defp subscriber_joined(track, published_subscription, request_id, state) do
     track_name = published_track_name(track)
-    {identity, state} = take_joining_subscription(state, track_name, request_id)
+    {identity, state} = take_joining_subscription(state, published_subscription, request_id)
     previous_count = Map.get(state.subscriber_counts, track_name, 0)
     count = previous_count + 1
 
     state =
       state
-      |> put_in([:active_subscription_requests, request_id], identity)
+      |> put_in(
+        [:active_subscriptions, published_subscription],
+        %{identity: identity, track_name: track_name}
+      )
       |> put_in([:subscriber_counts, track_name], count)
 
     notification = {:subscriber_joined, track_name, identity, count}
@@ -651,15 +701,24 @@ defmodule Membrane.MOQX.Sink do
     {actions, state}
   end
 
-  defp subscriber_left(track, request_id, state) do
+  defp subscriber_left(track, published_subscription, request_id, state) do
     track_name = published_track_name(track)
-    {identity, active} = Map.pop(state.active_subscription_requests, request_id, request_id)
+
+    {active_subscription, active} =
+      Map.pop(state.active_subscriptions, published_subscription)
+
+    identity =
+      case active_subscription do
+        %{identity: identity} -> identity
+        nil -> request_id
+      end
+
     previous_count = Map.get(state.subscriber_counts, track_name, 1)
     count = max(previous_count - 1, 0)
 
     state = %{
       state
-      | active_subscription_requests: active,
+      | active_subscriptions: active,
         subscriber_counts: Map.put(state.subscriber_counts, track_name, count)
     }
 
@@ -830,8 +889,8 @@ defmodule Membrane.MOQX.Sink do
 
   defp accept_subscription_request(request, published_track, state) do
     case MOQX.accept_subscription(state.client, request, published_track) do
-      :ok ->
-        {[], mark_subscription_joining(request, state)}
+      {:ok, published_subscription} ->
+        {[], mark_subscription_joining(request, published_subscription, state)}
 
       {:error, reason} ->
         notification = {:subscription_decision_failed, request, reason}
@@ -839,15 +898,10 @@ defmodule Membrane.MOQX.Sink do
     end
   end
 
-  defp mark_subscription_joining(request, state) do
-    track_name = request.track.track
-
+  defp mark_subscription_joining(request, published_subscription, state) do
     state
     |> update_in([:pending_subscription_requests], &Map.delete(&1, request.handle))
-    |> update_in([:joining_subscription_requests, track_name], fn
-      nil -> [request]
-      requests -> requests ++ [request]
-    end)
+    |> put_in([:joining_subscription_requests, published_subscription], request.handle)
   end
 
   defp accept_approved_subscriptions(track_names, state) do
@@ -871,21 +925,30 @@ defmodule Membrane.MOQX.Sink do
     end)
   end
 
-  defp take_joining_subscription(state, track_name, request_id) do
-    case Map.get(state.joining_subscription_requests, track_name, []) do
-      [request | rest] ->
-        joining =
-          if rest == [] do
-            Map.delete(state.joining_subscription_requests, track_name)
-          else
-            Map.put(state.joining_subscription_requests, track_name, rest)
-          end
+  defp take_joining_subscription(state, published_subscription, request_id) do
+    {identity, joining} =
+      Map.pop(state.joining_subscription_requests, published_subscription, request_id)
 
-        {request.handle, %{state | joining_subscription_requests: joining}}
+    {identity, %{state | joining_subscription_requests: joining}}
+  end
 
-      [] ->
-        {request_id, state}
-    end
+  defp find_active_subscription(state, request_handle) do
+    Enum.find_value(state.active_subscriptions, fn
+      {published_subscription, %{identity: ^request_handle}} -> published_subscription
+      _entry -> nil
+    end)
+  end
+
+  defp finish_track_subscriptions(state, track_name, options) do
+    state.active_subscriptions
+    |> Enum.filter(fn {_subscription, active} -> active.track_name == track_name end)
+    |> Enum.reduce_while(:ok, fn {published_subscription, _active}, :ok ->
+      case MOQX.finish_subscription(state.client, published_subscription, options) do
+        :ok -> {:cont, :ok}
+        {:error, :stale_published_subscription} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp track_demand_actions(%{track_demand_events: false}, _track_name, _previous, _count),

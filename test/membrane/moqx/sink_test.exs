@@ -190,7 +190,7 @@ defmodule Membrane.MOQX.SinkTest do
     assert :ok = TestDraft16Relay.await_shutdown(relay)
   end
 
-  test "keeps draft-16 readiness separate from controlled subscriber demand" do
+  test "finishes a draft-16 subscriber when its source reaches end of stream" do
     namespace = ["operator", "controlled"]
     relay = TestDraft16Relay.start_controlled(namespace, "captions")
     stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
@@ -248,7 +248,8 @@ defmodule Membrane.MOQX.SinkTest do
        %Membrane.MOQX.Event.TrackDemand{active?: true, subscriber_count: 1}}
     )
 
-    assert :ok = TestDraft16Relay.unsubscribe(relay)
+    assert :ok = Testing.Pipeline.notify_child(pipeline, :source, :end_of_stream)
+    assert :ok = TestDraft16Relay.await_publisher_finish(relay, 1)
 
     assert_pipeline_notified(
       pipeline,
@@ -762,7 +763,7 @@ defmodule Membrane.MOQX.SinkTest do
     assert :ok = TestRelay.await_shutdown(controlled_relay)
   end
 
-  test "coalesces multiple approved requests onto one dynamically provisioned track" do
+  test "finishes one approved subscription while its sibling keeps track demand active" do
     namespace = ["live", "coalesced"]
     relay = TestRelay.start(namespace)
 
@@ -774,7 +775,8 @@ defmodule Membrane.MOQX.SinkTest do
             protocol: :cloudflare_draft_14,
             namespace: namespace,
             transport: TestRelay.transport(relay),
-            inbound_subscriptions: :controlled
+            inbound_subscriptions: :controlled,
+            track_demand_events: true
           })
       )
 
@@ -810,14 +812,8 @@ defmodule Membrane.MOQX.SinkTest do
 
     stream_format = %Membrane.MOQX.Track{packaging: "opaque", initialization: nil}
 
-    buffer = %Buffer{
-      payload: "one producer",
-      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
-    }
-
     track_spec =
-      child(:source, %TestDynamicSource{stream_format: stream_format, buffer: buffer})
-      |> via_out(Pad.ref(:output, :shared))
+      child(:source, %TestControlledSource{stream_format: stream_format})
       |> via_in(Pad.ref(:input, :shared), options: [track_name: "shared", retention: :latest])
       |> get_child(:sink)
 
@@ -847,14 +843,70 @@ defmodule Membrane.MOQX.SinkTest do
     assert MapSet.new([first_identity, second_identity]) ==
              MapSet.new([first_request.handle, second_request.handle])
 
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: true, subscriber_count: 1}}
+    )
+
+    buffer = %Buffer{
+      payload: "both subscribers",
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    assert :ok = Testing.Pipeline.notify_child(pipeline, :source, {:publish, [buffer]})
     assert {:ok, objects} = TestRelay.receive_subscription_objects(relay, 2)
     assert Enum.map(objects, & &1.payload) == [buffer.payload, buffer.payload]
 
-    assert :ok = TestRelay.unsubscribe(relay, first_id)
-    assert_pipeline_notified(pipeline, :sink, {:subscriber_left, "shared", _identity, 1})
+    assert :ok =
+             Testing.Pipeline.notify_child(
+               pipeline,
+               :sink,
+               {:finish_subscription, first_request.handle,
+                [status: :subscription_ended, reason: "operator removed subscriber"]}
+             )
+
+    assert :ok = TestRelay.await_publisher_finish(relay, first_id)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_left, "shared", ^first_identity, 1}
+    )
+
+    refute_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: false, subscriber_count: 0}}
+    )
+
+    remaining_buffer = %Buffer{
+      payload: "remaining subscriber",
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    assert :ok =
+             Testing.Pipeline.notify_child(pipeline, :source, {:publish, [remaining_buffer]})
+
+    assert {:ok, [remaining_object]} = TestRelay.receive_subscription_objects(relay, 1)
+    assert remaining_object.payload == remaining_buffer.payload
 
     assert :ok = TestRelay.unsubscribe(relay, second_id)
-    assert_pipeline_notified(pipeline, :sink, {:subscriber_left, "shared", _identity, 0})
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_left, "shared", ^second_identity, 0}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: false, subscriber_count: 0}}
+    )
 
     assert :ok = Testing.Pipeline.terminate(pipeline)
     assert :ok = TestRelay.await_shutdown(relay)

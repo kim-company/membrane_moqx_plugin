@@ -64,6 +64,17 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     end
   end
 
+  def await_publisher_finish(%__MODULE__{task: task}, stream_count) do
+    send(task.pid, {:await_publisher_finish, self(), stream_count})
+
+    receive do
+      {:draft16_publisher_finished, pid} when pid == task.pid -> :ok
+      {:draft16_relay_error, pid, reason} when pid == task.pid -> {:error, reason}
+    after
+      @timeout -> {:error, :publisher_finish_timeout}
+    end
+  end
+
   def transport(%__MODULE__{network: network}) do
     {Support, network: network, profile: :draft_16}
   end
@@ -191,6 +202,15 @@ defmodule Membrane.MOQX.TestDraft16Relay do
              {:ok, ^expected, ctx} <-
                Transport.recv_stream(ctx, control, byte_size(expected)) do
           send(caller, {:draft16_unsubscribed, self()})
+          await_stop(ctx, conn)
+        end
+
+      {:await_publisher_finish, caller, stream_count} ->
+        expected = Codec.publish_done(1, 2, stream_count, "track ended")
+
+        with {:ok, ^expected, ctx} <-
+               Transport.recv_stream(ctx, control, byte_size(expected)) do
+          send(caller, {:draft16_publisher_finished, self()})
           await_stop(ctx, conn)
         end
     after

@@ -294,6 +294,26 @@ the current count for that track:
 {:subscriber_left, track_name, identity, subscriber_count}
 ```
 
+The identity remains the original request handle in controlled mode. The Sink
+retains MOQX's separate opaque published-subscription handle internally, so the
+parent can finish exactly one accepted subscriber without withdrawing the
+track or namespace:
+
+```elixir
+Membrane.Pipeline.notify_child(
+  pipeline,
+  :moqx_sink,
+  {:finish_subscription, identity,
+   [status: :subscription_ended, reason: "operator removed subscriber"]}
+)
+```
+
+The resulting MOQX terminal event produces the ordinary
+`{:subscriber_left, ...}` notification and updates aggregate demand. Ending or
+removing a pad finishes every active subscription for that track with
+`:track_ended`; subscriptions on other tracks remain active. A remote
+unsubscribe racing that cleanup is treated as the same terminal lifecycle.
+
 In controlled mode the catalog and known initialization tracks are accepted
 automatically by default. Set `infrastructure_subscriptions: :controlled` to
 route those requests through the parent too.
