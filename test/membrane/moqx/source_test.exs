@@ -8,6 +8,16 @@ defmodule Membrane.MOQX.SourceTest do
   alias Membrane.MOQX.{Session, Source, TestLite05Publisher, TestPublisher, Track, Unit}
   alias Membrane.Testing
 
+  test "requires an explicit protocol for session-backed sources" do
+    assert_raise ArgumentError, fn ->
+      struct!(Source,
+        session: self(),
+        track: %MOQX.TrackRef{namespace: ["live"], track: "required-protocol"},
+        stream_format: %Track{packaging: "application/example", initialization: nil}
+      )
+    end
+  end
+
   test "subscribes to one track and emits canonical buffers with received coordinates" do
     track_ref = %MOQX.TrackRef{namespace: ["live", "source"], track: "captions"}
 
@@ -143,6 +153,7 @@ defmodule Membrane.MOQX.SourceTest do
     spec =
       child(:source, %Source{
         session: session,
+        protocol: :cloudflare_draft_14,
         track: track_ref,
         stream_format: stream_format,
         subscription_options: [delivery_timeout: 50]
@@ -168,6 +179,51 @@ defmodule Membrane.MOQX.SourceTest do
     assert Process.alive?(session)
     assert :ok = Session.close(session)
     assert :ok = TestPublisher.await_shutdown(publisher)
+  end
+
+  test "routes subgroup completion through a shared session" do
+    track_ref = %MOQX.TrackRef{namespace: ["live", "shared-lite"], track: "opus"}
+    stream_format = %Track{packaging: "opus", initialization: nil}
+
+    publisher = TestLite05Publisher.start(track_ref, 48_000, [{48_000, "first"}, {960, "last"}])
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    {:ok, session} =
+      Session.start_link(
+        endpoint: publisher.endpoint,
+        protocol: :moq_lite_05,
+        transport: TestLite05Publisher.transport(publisher)
+      )
+
+    spec =
+      child(:source, %Source{
+        session: session,
+        protocol: :moq_lite_05,
+        track: track_ref,
+        stream_format: stream_format
+      })
+      |> child(:sink, %Testing.Sink{})
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_sink_buffer(pipeline, :sink, %Buffer{payload: "first"})
+    TestLite05Publisher.finish_group(publisher)
+
+    assert_sink_buffer(
+      pipeline,
+      :sink,
+      %Buffer{payload: "last", metadata: %{moqx: %Unit{group_end?: true}}}
+    )
+
+    TestLite05Publisher.finish_subscription(publisher)
+    assert_end_of_stream(pipeline, :sink)
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = Session.close(session)
+    assert :ok = TestLite05Publisher.await_shutdown(publisher)
   end
 
   test "matches subgroup completion by group and subgroup identity" do

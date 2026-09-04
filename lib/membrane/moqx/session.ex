@@ -187,6 +187,10 @@ defmodule Membrane.MOQX.Session do
 
   defp event_subscription(%MOQX.Event.ObjectReceived{object: object}), do: object.subscription
   defp event_subscription(%MOQX.Event.ObjectStatus{object: object}), do: object.subscription
+
+  defp event_subscription(%MOQX.Event.SubgroupEnded{subscription: subscription}),
+    do: subscription
+
   defp event_subscription(_event), do: nil
 
   defp terminal_event?(%MOQX.Event.SubscriptionFailed{}), do: true

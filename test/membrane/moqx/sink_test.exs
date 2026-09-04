@@ -912,6 +912,65 @@ defmodule Membrane.MOQX.SinkTest do
     assert :ok = TestRelay.await_shutdown(relay)
   end
 
+  test "does not crash when an approved request becomes stale before pad removal" do
+    namespace = ["live", "stale-before-removal"]
+    relay = TestRelay.start(namespace)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :cloudflare_draft_14,
+            namespace: namespace,
+            transport: TestRelay.transport(relay),
+            inbound_subscriptions: :controlled
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    assert {:ok, request_id} = TestRelay.request_subscription(relay, "stale-track")
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+    )
+
+    assert :ok = Testing.Pipeline.notify_child(pipeline, :sink, {:accept_subscription, request})
+
+    track_spec =
+      child(:source, %TestDynamicSource{})
+      |> via_out(Pad.ref(:output, :stale))
+      |> via_in(Pad.ref(:input, :stale), options: [track_name: "stale-track"])
+      |> get_child(:sink)
+
+    assert :ok = Testing.Pipeline.execute_actions(pipeline, spec: track_spec)
+    assert_receive {Testing.Pipeline, ^pipeline, {:handle_child_playing, :source}}
+
+    sink_pid = Testing.Pipeline.get_child_pid!(pipeline, :sink)
+    client = :sys.get_state(sink_pid).internal_state.client
+
+    assert :ok =
+             MOQX.reject_subscription(client, request, %MOQX.SubscriptionRejection{
+               code: :track_does_not_exist,
+               reason: "competing rejection"
+             })
+
+    assert {:error, %{code: 4, reason: "competing rejection"}} =
+             TestRelay.await_subscription_result(relay, request_id)
+
+    assert :ok =
+             Testing.Pipeline.execute_actions(
+               pipeline,
+               remove_link: {:sink, Pad.ref(:input, :stale)}
+             )
+
+    assert Process.alive?(sink_pid)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
+
   test "invalidates a controlled request cancelled while pending" do
     namespace = ["live", "pending-cancel"]
     relay = TestRelay.start(namespace)

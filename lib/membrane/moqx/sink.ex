@@ -1011,19 +1011,23 @@ defmodule Membrane.MOQX.Sink do
 
       case MOQX.reject_subscription(state.client, pending.request, rejection) do
         :ok ->
-          state =
-            update_in(
-              state.pending_subscription_requests,
-              &Map.delete(&1, pending.request.handle)
-            )
+          state = drop_pending_subscription_request(state, pending.request)
 
           notification = {:subscription_cancelled, pending.request, cancellation_reason}
           {:cont, {:ok, actions ++ [notify_parent: notification], state}}
+
+        {:error, :stale_subscription_request} ->
+          state = drop_pending_subscription_request(state, pending.request)
+          {:cont, {:ok, actions, state}}
 
         {:error, reason} ->
           {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp drop_pending_subscription_request(state, request) do
+    update_in(state.pending_subscription_requests, &Map.delete(&1, request.handle))
   end
 
   defp take_joining_subscription(state, published_subscription, request_id) do

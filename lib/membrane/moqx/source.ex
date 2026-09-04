@@ -34,7 +34,7 @@ defmodule Membrane.MOQX.Source do
     accepted_format: %Track{}
 
   def_options endpoint: [spec: binary() | URI.t() | nil, default: nil],
-              protocol: [spec: atom() | module() | nil, default: nil],
+              protocol: [spec: atom() | module(), required: true],
               session: [spec: pid() | nil, default: nil],
               track: [spec: MOQX.TrackRef.t(), required: true],
               stream_format: [spec: Track.t(), required: true],
@@ -326,7 +326,9 @@ defmodule Membrane.MOQX.Source do
   defp put_if_present(options, _key, nil), do: options
   defp put_if_present(options, key, value), do: Keyword.put(options, key, value)
 
-  defp validate_connection_options(%{session: session}) when is_pid(session), do: :ok
+  defp validate_connection_options(%{session: session, protocol: protocol})
+       when is_pid(session) and not is_nil(protocol),
+       do: :ok
 
   defp validate_connection_options(%{endpoint: endpoint, protocol: protocol})
        when (is_binary(endpoint) or is_struct(endpoint, URI)) and not is_nil(protocol),
