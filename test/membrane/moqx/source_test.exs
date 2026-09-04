@@ -5,7 +5,17 @@ defmodule Membrane.MOQX.SourceTest do
   import Membrane.Testing.Assertions
 
   alias Membrane.Buffer
-  alias Membrane.MOQX.{Session, Source, TestLite05Publisher, TestPublisher, Track, Unit}
+
+  alias Membrane.MOQX.{
+    Session,
+    Source,
+    TestDraft16Publisher,
+    TestLite05Publisher,
+    TestPublisher,
+    Track,
+    Unit
+  }
+
   alias Membrane.Testing
 
   test "requires an explicit protocol for session-backed sources" do
@@ -224,6 +234,83 @@ defmodule Membrane.MOQX.SourceTest do
     assert :ok = Testing.Pipeline.terminate(pipeline)
     assert :ok = Session.close(session)
     assert :ok = TestLite05Publisher.await_shutdown(publisher)
+  end
+
+  test "uses explicit protocol identity for draft-16 datagrams through a shared session" do
+    namespace = ["moqtail", "shared-datagrams"]
+    track_ref = %MOQX.TrackRef{namespace: namespace, track: "video"}
+
+    catalog =
+      JSON.encode!(%{
+        "version" => 1,
+        "tracks" => [
+          %{
+            "name" => "video",
+            "role" => "video",
+            "packaging" => "cmaf",
+            "codec" => "avc1.42C01F",
+            "width" => 640,
+            "height" => 360,
+            "timescale" => 90_000
+          }
+        ]
+      })
+
+    publisher =
+      TestDraft16Publisher.start(
+        namespace,
+        catalog,
+        "video",
+        [
+          %MOQX.Object{group_id: 1, object_id: 0, payload: "first"},
+          %MOQX.Object{group_id: 2, object_id: 0, payload: "second"}
+        ],
+        delivery: :datagram
+      )
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    {:ok, session} =
+      Session.start_link(
+        endpoint: publisher.endpoint,
+        protocol: :draft_16,
+        transport: TestDraft16Publisher.transport(publisher)
+      )
+
+    catalog_ref = %MOQX.TrackRef{namespace: namespace, track: "catalog"}
+    assert {:ok, _subscription} = Session.subscribe(session, catalog_ref, catalog?: true)
+    assert_receive {:moqx_session, ^session, %MOQX.Event.CatalogReceived{}}
+
+    spec =
+      child(:source, %Source{
+        session: session,
+        protocol: :draft_16,
+        track: track_ref,
+        stream_format: %Track{packaging: "cmaf", initialization: nil}
+      })
+      |> child(:sink, %Testing.Sink{})
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pipeline, :source, {:subscription_ready, ^track_ref})
+
+    TestDraft16Publisher.publish_media(publisher)
+    assert :ok = TestDraft16Publisher.await_datagrams(publisher)
+
+    assert_sink_buffer(
+      pipeline,
+      :sink,
+      %Buffer{
+        payload: "first",
+        metadata: %{moqx: %Unit{group_id: 1, subgroup_id: nil, group_end?: true}}
+      }
+    )
+
+    TestDraft16Publisher.finish_media(publisher)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = Session.close(session)
+    assert :ok = TestDraft16Publisher.await_shutdown(publisher)
   end
 
   test "matches subgroup completion by group and subgroup identity" do
