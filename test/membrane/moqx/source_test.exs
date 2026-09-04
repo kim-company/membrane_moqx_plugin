@@ -202,7 +202,6 @@ defmodule Membrane.MOQX.SourceTest do
     pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
 
     assert_sink_buffer(pipeline, :sink, %Buffer{payload: "first"})
-    assert_sink_buffer(pipeline, :sink, %Buffer{payload: "other"})
 
     assert_sink_buffer(
       pipeline,
@@ -215,6 +214,22 @@ defmodule Membrane.MOQX.SourceTest do
             group_id: 7,
             subgroup_id: 0,
             object_id: 1
+          }
+        }
+      }
+    )
+
+    assert_sink_buffer(
+      pipeline,
+      :sink,
+      %Buffer{
+        payload: "other",
+        metadata: %{
+          moqx: %Unit{
+            group_end?: false,
+            group_id: 7,
+            subgroup_id: 1,
+            object_id: 0
           }
         }
       }

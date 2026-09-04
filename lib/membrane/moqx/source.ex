@@ -4,6 +4,8 @@ defmodule Membrane.MOQX.Source do
 
   Payload bytes remain unchanged. Received MOQ coordinates, priority, status,
   and inferred group boundaries are stored in Membrane.MOQX.Unit metadata.
+  Objects preserve order within each subgroup. Interleaved subgroup streams
+  become eligible independently when their own subgroup advances or completes.
 
   `protocol` is explicit and never inferred from the endpoint.
   `subscription_options` pass through to `MOQX.subscribe/3`, including
@@ -25,7 +27,7 @@ defmodule Membrane.MOQX.Source do
 
   use Membrane.Source
 
-  alias Membrane.MOQX.{Session, Timestamp, Track, Unit}
+  alias Membrane.MOQX.{ProtocolConventions, Session, Timestamp, Track, Unit}
 
   def_output_pad :output,
     flow_control: :push,
@@ -53,7 +55,7 @@ defmodule Membrane.MOQX.Source do
         subscription: nil,
         accepted?: false,
         playing?: false,
-        pending_object: nil,
+        pending_objects: %{},
         queued_events: [],
         initial_group: nil,
         track_timescale: nil,
@@ -203,27 +205,33 @@ defmodule Membrane.MOQX.Source do
     end)
   end
 
-  defp consume_event({:object, object}, %{pending_object: nil} = state) do
-    case start_object?(object, state) do
-      {true, state} -> {[], %{state | pending_object: object}}
-      {false, state} -> {[], state}
+  defp consume_event({:object, object}, state) do
+    key = object_subgroup_key(object, state)
+
+    case Map.pop(state.pending_objects, key) do
+      {nil, _pending_objects} ->
+        case start_object?(object, state) do
+          {true, state} -> {[], put_in(state, [:pending_objects, key], object)}
+          {false, state} -> {[], state}
+        end
+
+      {previous, pending_objects} ->
+        group_end? = object_ends_group?(previous, object)
+        action = {:buffer, {:output, object_buffer(previous, group_end?, state)}}
+        pending_objects = Map.put(pending_objects, key, object)
+        {[action], %{state | pending_objects: pending_objects}}
     end
-  end
-
-  defp consume_event({:object, object}, %{pending_object: previous} = state) do
-    group_end? =
-      previous.group_id != object.group_id or previous.status in [:end_of_group, :end_of_track]
-
-    action = {:buffer, {:output, object_buffer(previous, group_end?, state)}}
-    {[action], %{state | pending_object: object}}
   end
 
   defp consume_event({:subscription_done, completion}, %{ended?: false} = state) do
     buffer_actions =
-      case state.pending_object do
-        nil -> []
-        object -> [buffer: {:output, object_buffer(object, true, state)}]
-      end
+      state.pending_objects
+      |> Enum.sort_by(fn {_key, object} ->
+        {object.group_id, object.subgroup_id, object.object_id}
+      end)
+      |> Enum.map(fn {_key, object} ->
+        {:buffer, {:output, object_buffer(object, true, state)}}
+      end)
 
     notification = {:subscription_done, state.track, completion}
 
@@ -234,24 +242,40 @@ defmodule Membrane.MOQX.Source do
           end_of_stream: :output
         ]
 
-    {actions, %{state | pending_object: nil, ended?: true}}
+    {actions, %{state | pending_objects: %{}, ended?: true}}
   end
 
   defp consume_event({:subscription_done, _completion}, state), do: {[], state}
 
   defp consume_event(
          {:subgroup_ended, event},
-         %{
-           pending_object: %{group_id: group_id, subgroup_id: subgroup_id} = object
-         } = state
-       )
-       when event.group_id == group_id and event.subgroup_id == subgroup_id do
-    complete? = event.outcome == :complete and event.end_of_group?
-    actions = [buffer: {:output, object_buffer(object, complete?, state)}]
-    {actions, %{state | pending_object: nil}}
+         state
+       ) do
+    key = {event.group_id, event.subgroup_id}
+
+    case Map.pop(state.pending_objects, key) do
+      {nil, _pending_objects} ->
+        {[], state}
+
+      {object, pending_objects} ->
+        complete? = event.outcome == :complete and event.end_of_group?
+        actions = [buffer: {:output, object_buffer(object, complete?, state)}]
+        {actions, %{state | pending_objects: pending_objects}}
+    end
   end
 
-  defp consume_event({:subgroup_ended, _event}, state), do: {[], state}
+  defp object_subgroup_key(%{group_id: group_id, subgroup_id: nil}, state) do
+    if ProtocolConventions.draft_16?(state.protocol),
+      do: :draft_16_datagram,
+      else: {group_id, nil}
+  end
+
+  defp object_subgroup_key(object, _state), do: {object.group_id, object.subgroup_id}
+
+  defp object_ends_group?(previous, next) do
+    previous.group_id != next.group_id or previous.end_of_group? == true or
+      previous.status in [:end_of_group, :end_of_track]
+  end
 
   defp object_buffer(object, group_end?, state) do
     unit = %Unit{

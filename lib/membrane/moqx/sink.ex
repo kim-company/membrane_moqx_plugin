@@ -15,7 +15,9 @@ defmodule Membrane.MOQX.Sink do
 
   Subscriber join/leave notifications include the track's current subscriber
   count. Optional `Membrane.MOQX.Event.TrackDemand` events carry only aggregate
-  zero/nonzero demand transitions upstream on an established media pad.
+  zero/nonzero demand transitions upstream on an established media pad. Pad
+  removal terminates that event edge and does not synthesize a final inactive
+  event on the detached pad; the parent still observes subscriber departure.
   A parent can finish one accepted subscriber without withdrawing the track by
   sending `{:finish_subscription, request_handle, options}`.
 
@@ -160,8 +162,21 @@ defmodule Membrane.MOQX.Sink do
     state = %{state | pads: pads}
 
     cond do
-      is_nil(pad_state) or is_nil(pad_state.track) ->
+      is_nil(pad_state) ->
         {[], state}
+
+      is_nil(pad_state.track) ->
+        case reject_approved_subscriptions_for_track(
+               pad_state.options.track_name,
+               :track_removed,
+               state
+             ) do
+          {:ok, actions, state} ->
+            {actions, state}
+
+          {:error, reason} ->
+            raise "failed to reject subscriptions for removed MOQX pad: #{inspect(reason)}"
+        end
 
       pad_state.ended? ->
         {[notify_parent: {:track_removed, pad, pad_state.options.track_name}], state}
@@ -979,6 +994,34 @@ defmodule Membrane.MOQX.Sink do
         {actions ++ next_actions, state}
       else
         {actions, state}
+      end
+    end)
+  end
+
+  defp reject_approved_subscriptions_for_track(track_name, cancellation_reason, state) do
+    state.pending_subscription_requests
+    |> Enum.filter(fn {_handle, pending} ->
+      pending.status == :approved and pending.request.track.track == track_name
+    end)
+    |> Enum.reduce_while({:ok, [], state}, fn {_handle, pending}, {:ok, actions, state} ->
+      rejection = %MOQX.SubscriptionRejection{
+        code: :track_does_not_exist,
+        reason: "track removed before registration"
+      }
+
+      case MOQX.reject_subscription(state.client, pending.request, rejection) do
+        :ok ->
+          state =
+            update_in(
+              state.pending_subscription_requests,
+              &Map.delete(&1, pending.request.handle)
+            )
+
+          notification = {:subscription_cancelled, pending.request, cancellation_reason}
+          {:cont, {:ok, actions ++ [notify_parent: notification], state}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
   end

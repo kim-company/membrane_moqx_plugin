@@ -269,6 +269,13 @@ defmodule Membrane.MOQX.SinkTest do
       {:track_removed, Pad.ref(:input, :captions), "captions"}
     )
 
+    refute_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, Pad.ref(:output, :captions), %{active?: false}},
+      100
+    )
+
     assert :ok = Testing.Pipeline.terminate(pipeline)
     assert :ok = TestLite05Relay.await_shutdown(relay)
   end
@@ -843,6 +850,64 @@ defmodule Membrane.MOQX.SinkTest do
     assert object.payload == buffer.payload
 
     assert :ok = TestRelay.unsubscribe(relay, request_id)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
+
+  test "rejects an approved request when its unregistered dynamic pad is removed" do
+    namespace = ["live", "removed-before-registration"]
+    relay = TestRelay.start(namespace)
+
+    sink = %Sink{
+      endpoint: relay.endpoint,
+      protocol: :cloudflare_draft_14,
+      namespace: namespace,
+      transport: TestRelay.transport(relay),
+      inbound_subscriptions: :controlled
+    }
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: child(:sink, sink))
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+
+    assert {:ok, request_id} =
+             TestRelay.request_subscription(relay, "subtitles/not-registered")
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+    )
+
+    assert :ok =
+             Testing.Pipeline.notify_child(pipeline, :sink, {:accept_subscription, request})
+
+    track_spec =
+      child(:source, %TestDynamicSource{})
+      |> via_out(Pad.ref(:output, :subtitles))
+      |> via_in(Pad.ref(:input, :subtitles),
+        options: [track_name: "subtitles/not-registered"]
+      )
+      |> get_child(:sink)
+
+    assert :ok = Testing.Pipeline.execute_actions(pipeline, spec: track_spec)
+
+    assert_receive {Testing.Pipeline, ^pipeline, {:handle_child_playing, :source}}
+
+    assert :ok =
+             Testing.Pipeline.execute_actions(
+               pipeline,
+               remove_link: {:sink, Pad.ref(:input, :subtitles)}
+             )
+
+    assert {:error, %{code: 4, reason: "track removed before registration"}} =
+             TestRelay.await_subscription_result(relay, request_id)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_cancelled, ^request, :track_removed}
+    )
+
     assert :ok = Testing.Pipeline.terminate(pipeline)
     assert :ok = TestRelay.await_shutdown(relay)
   end

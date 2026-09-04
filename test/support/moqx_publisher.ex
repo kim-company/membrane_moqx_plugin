@@ -183,11 +183,14 @@ defmodule Membrane.MOQX.TestPublisher do
          {:ok, second_stream, ctx} <-
            Transport.open_stream(ctx, conn, direction: :unidirectional),
          {:ok, _send, ctx} <- Transport.send_stream(ctx, first_stream, first_bytes),
-         {:ok, _send, ctx} <-
-           Transport.send_stream(ctx, second_stream, other_bytes, finish: true),
+         {:ok, _send, ctx} <- Transport.send_stream(ctx, first_stream, first_continuation),
+         {:ok, _send, ctx} <- Transport.send_stream(ctx, second_stream, other_bytes),
          :ok <- wait_for_peer_to_process_subgroup_end(),
          {:ok, _send, ctx} <-
-           Transport.send_stream(ctx, first_stream, first_continuation, finish: true),
+           Transport.send_stream(ctx, first_stream, <<>>, finish: true),
+         :ok <- wait_for_peer_to_process_subgroup_end(),
+         {:ok, _send, ctx} <-
+           Transport.send_stream(ctx, second_stream, <<>>, finish: true),
          :ok <- wait_for_peer_to_process_subgroup_end() do
       {:ok, ctx}
     end

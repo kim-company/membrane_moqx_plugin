@@ -90,7 +90,7 @@ defmodule Membrane.MOQX.CatalogSource do
 
     case stream_format do
       %Track{} ->
-        {spec, pad_state} = source_spec(pad, pad_state, state.session)
+        {spec, pad_state} = source_spec(pad, pad_state, state)
         {[request_action, spec: spec], put_in(state, [:pads, pad], pad_state)}
 
       nil ->
@@ -279,7 +279,7 @@ defmodule Membrane.MOQX.CatalogSource do
       {pad, %{track_ref: track_ref, child: nil, stream_format: nil} = pad_state}, {actions, state}
       when track_ref == offer.track_ref ->
         pad_state = %{pad_state | stream_format: offer.stream_format}
-        {spec, pad_state} = source_spec(pad, pad_state, state.session)
+        {spec, pad_state} = source_spec(pad, pad_state, state)
         {actions ++ [spec: spec], put_in(state, [:pads, pad], pad_state)}
 
       {_pad, _pad_state}, acc ->
@@ -287,12 +287,13 @@ defmodule Membrane.MOQX.CatalogSource do
     end)
   end
 
-  defp source_spec(pad, pad_state, session) do
+  defp source_spec(pad, pad_state, state) do
     child = {:track_source, pad}
 
     spec =
       child(child, %Source{
-        session: session,
+        session: state.session,
+        protocol: state.protocol,
         track: pad_state.track_ref,
         stream_format: pad_state.stream_format,
         start_policy: pad_state.options.start_policy,
