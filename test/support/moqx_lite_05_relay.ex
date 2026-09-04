@@ -105,6 +105,17 @@ defmodule Membrane.MOQX.TestLite05Relay do
     end
   end
 
+  def assert_track_withdrawn(%__MODULE__{task: task}) do
+    send(task.pid, {:assert_track_withdrawn, self()})
+
+    receive do
+      {:lite_track_withdrawn, pid} when pid == task.pid -> :ok
+      {:lite_relay_error, pid, reason} when pid == task.pid -> {:error, reason}
+    after
+      @timeout -> {:error, :track_withdrawal_timeout}
+    end
+  end
+
   def await_shutdown(%__MODULE__{task: task}) do
     send(task.pid, :stop)
 
@@ -154,6 +165,7 @@ defmodule Membrane.MOQX.TestLite05Relay do
          {:ok, capture, ctx} <- receive_group(ctx, conn, frames),
          _message = send(parent, {:lite_capture, self(), capture}),
          {:ok, ctx} <- finish_subscription(parent, ctx, subscribe, options[:completion]),
+         {:ok, ctx} <- verify_track_withdrawal(ctx, conn, path, track_name, options),
          :ok <- await_stop(),
          {:ok, _ctx} <- Transport.close_connection(ctx, conn, 0) do
       :ok
@@ -191,6 +203,50 @@ defmodule Membrane.MOQX.TestLite05Relay do
   end
 
   defp finish_subscription(_parent, ctx, stream, _completion), do: unsubscribe(ctx, stream)
+
+  defp verify_track_withdrawal(ctx, conn, path, track_name, options) do
+    if options[:verify_withdrawal] do
+      receive do
+        {:assert_track_withdrawn, caller} ->
+          with {:ok, track, ctx} <-
+                 Transport.open_stream(ctx, conn, direction: :bidirectional),
+               {:ok, _send, ctx} <-
+                 Transport.send_stream(
+                   ctx,
+                   track,
+                   <<6,
+                     Codec.encode_track(%Track{
+                       broadcast_path: path,
+                       track_name: track_name
+                     })::binary>>
+                 ),
+               {:ok, ctx} <- expect_stream_abort(ctx, track, 0x10) do
+            send(caller, {:lite_track_withdrawn, self()})
+            {:ok, ctx}
+          end
+      after
+        @timeout -> {:error, :track_withdrawal_not_checked, ctx}
+      end
+    else
+      {:ok, ctx}
+    end
+  end
+
+  defp expect_stream_abort(ctx, stream, error_code) do
+    case Transport.receive_event(ctx, @timeout) do
+      {:ok, {:stream_event, ^stream, :peer_aborted_sending, %{error_code: ^error_code}}, ctx} ->
+        {:ok, ctx}
+
+      {:ok, _event, ctx} ->
+        expect_stream_abort(ctx, stream, error_code)
+
+      {:unknown, _message, ctx} ->
+        expect_stream_abort(ctx, stream, error_code)
+
+      {:timeout, ctx} ->
+        {:error, :track_withdrawal_not_observed, ctx}
+    end
+  end
 
   defp receive_setup(ctx, stream) do
     expected = <<1, Codec.encode_setup(%Setup{path: "/", role: :both})::binary>>

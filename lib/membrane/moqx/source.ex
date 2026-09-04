@@ -241,9 +241,11 @@ defmodule Membrane.MOQX.Source do
 
   defp consume_event(
          {:subgroup_ended, event},
-         %{pending_object: %{group_id: group_id} = object} = state
+         %{
+           pending_object: %{group_id: group_id, subgroup_id: subgroup_id} = object
+         } = state
        )
-       when event.group_id == group_id do
+       when event.group_id == group_id and event.subgroup_id == subgroup_id do
     complete? = event.outcome == :complete and event.end_of_group?
     actions = [buffer: {:output, object_buffer(object, complete?, state)}]
     {actions, %{state | pending_object: nil}}

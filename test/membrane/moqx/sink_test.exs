@@ -153,7 +153,8 @@ defmodule Membrane.MOQX.SinkTest do
 
     relay =
       TestLite05Relay.start(namespace, "captions", track_info, [{1_000, "caption"}],
-        completion: :publisher
+        completion: :publisher,
+        verify_withdrawal: true
       )
 
     stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
@@ -187,7 +188,86 @@ defmodule Membrane.MOQX.SinkTest do
     assert {:ok, _capture} = TestLite05Relay.capture(relay)
     assert :ok = Testing.Pipeline.notify_child(pipeline, :source, :end_of_stream)
     assert :ok = TestLite05Relay.await_publisher_finish(relay)
+    assert :ok = TestLite05Relay.assert_track_withdrawn(relay)
     assert_pipeline_notified(pipeline, :source, {:track_demand, :output, %{active?: false}})
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Relay.await_shutdown(relay)
+  end
+
+  test "withdraws a MoQ Lite track when its dynamic media pad is removed" do
+    namespace = ["live", "removed"]
+
+    track_info = %MOQX.Protocol.MOQLite05.Messages.TrackInfo{
+      timescale: 1_000,
+      publisher_priority: 127,
+      publisher_ordered: false,
+      publisher_max_latency: 0
+    }
+
+    relay =
+      TestLite05Relay.start(namespace, "captions", track_info, [{1_000, "caption"}],
+        completion: :publisher,
+        verify_withdrawal: true
+      )
+
+    stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
+
+    spec =
+      child(:source, %TestDynamicSource{stream_format: stream_format})
+      |> via_out(Pad.ref(:output, :captions))
+      |> via_in(Pad.ref(:input, :captions),
+        options: [track_name: "captions", timescale: 1_000, retention: :latest]
+      )
+      |> child(:sink, %Sink{
+        endpoint: relay.endpoint,
+        protocol: :moq_lite_05,
+        namespace: namespace,
+        transport: TestLite05Relay.transport(relay),
+        track_demand_events: true
+      })
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    assert_pipeline_notified(pipeline, :sink, {:track_ready, _, "captions"})
+    assert {:ok, ^track_info} = TestLite05Relay.subscribe(relay)
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, Pad.ref(:output, :captions), %{active?: true}}
+    )
+
+    buffer = %Buffer{
+      payload: "caption",
+      pts: 1_000_000_000,
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    assert :ok =
+             Testing.Pipeline.notify_child(
+               pipeline,
+               :source,
+               {:publish, Pad.ref(:output, :captions), [buffer]}
+             )
+
+    assert {:ok, _capture} = TestLite05Relay.capture(relay)
+
+    assert :ok =
+             Testing.Pipeline.execute_actions(
+               pipeline,
+               remove_link: {:sink, Pad.ref(:input, :captions)}
+             )
+
+    assert :ok = TestLite05Relay.await_publisher_finish(relay)
+    assert :ok = TestLite05Relay.assert_track_withdrawn(relay)
+    assert_pipeline_notified(pipeline, :sink, {:subscriber_left, "captions", 42, 0})
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:track_removed, Pad.ref(:input, :captions), "captions"}
+    )
 
     assert :ok = Testing.Pipeline.terminate(pipeline)
     assert :ok = TestLite05Relay.await_shutdown(relay)
@@ -1296,11 +1376,6 @@ defmodule Membrane.MOQX.SinkTest do
       :sink,
       {:track_removed, Pad.ref(:input, :video), "video.m4s"}
     )
-
-    assert {:ok, [end_object]} = TestRelay.capture_many(relay, "video.m4s", 1)
-
-    assert {end_object.group_id, end_object.object_id, end_object.status, end_object.payload} ==
-             {1, 0, :end_of_track, <<>>}
 
     assert {:ok, %{".catalog" => removed_catalog}} = TestRelay.capture(relay, [".catalog"])
     assert %{"tracks" => []} = JSON.decode!(removed_catalog.payload)

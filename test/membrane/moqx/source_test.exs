@@ -170,6 +170,61 @@ defmodule Membrane.MOQX.SourceTest do
     assert :ok = TestPublisher.await_shutdown(publisher)
   end
 
+  test "matches subgroup completion by group and subgroup identity" do
+    track_ref = %MOQX.TrackRef{namespace: ["live", "interleaved"], track: "captions"}
+    stream_format = %Track{packaging: "webvtt", initialization: nil}
+
+    publisher =
+      TestPublisher.start_interleaved(
+        track_ref,
+        [
+          {%MOQX.Object{group_id: 7, subgroup_id: 0, object_id: 0, payload: "first"},
+           %MOQX.Object{group_id: 7, subgroup_id: 0, object_id: 1, payload: "last"}},
+          %MOQX.Object{group_id: 7, subgroup_id: 1, object_id: 0, payload: "other"}
+        ]
+      )
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    spec =
+      child(:source, %Source{
+        endpoint: publisher.endpoint,
+        protocol: :cloudflare_draft_14,
+        track: track_ref,
+        stream_format: stream_format,
+        transport: TestPublisher.transport(publisher),
+        subscription_options: [delivery_timeout: 500]
+      })
+      |> child(:sink, %Testing.Sink{})
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_sink_buffer(pipeline, :sink, %Buffer{payload: "first"})
+    assert_sink_buffer(pipeline, :sink, %Buffer{payload: "other"})
+
+    assert_sink_buffer(
+      pipeline,
+      :sink,
+      %Buffer{
+        payload: "last",
+        metadata: %{
+          moqx: %Unit{
+            group_end?: true,
+            group_id: 7,
+            subgroup_id: 0,
+            object_id: 1
+          }
+        }
+      }
+    )
+
+    assert_end_of_stream(pipeline, :sink)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestPublisher.await_shutdown(publisher)
+  end
+
   test "uses the MoQ Lite track timescale and frame timestamps for buffer PTS" do
     track_ref = %MOQX.TrackRef{namespace: ["live"], track: "opus"}
     stream_format = %Track{packaging: "opus", initialization: nil}

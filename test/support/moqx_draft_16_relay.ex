@@ -206,10 +206,13 @@ defmodule Membrane.MOQX.TestDraft16Relay do
         end
 
       {:await_publisher_finish, caller, stream_count} ->
-        expected = Codec.publish_done(1, 2, stream_count, "track ended")
+        expected_track = Codec.publish_done(4, 2, 1, "track ended")
+        expected_subscription = Codec.publish_done(1, 2, stream_count, "track ended")
 
-        with {:ok, ^expected, ctx} <-
-               Transport.recv_stream(ctx, control, byte_size(expected)) do
+        with {:ok, ^expected_track, ctx} <-
+               Transport.recv_stream(ctx, control, byte_size(expected_track)),
+             {:ok, ^expected_subscription, ctx} <-
+               Transport.recv_stream(ctx, control, byte_size(expected_subscription)) do
           send(caller, {:draft16_publisher_finished, self()})
           await_stop(ctx, conn)
         end

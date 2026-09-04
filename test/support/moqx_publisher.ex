@@ -14,6 +14,10 @@ defmodule Membrane.MOQX.TestPublisher do
     start_many([{track, objects}])
   end
 
+  def start_interleaved(%MOQX.TrackRef{} = track, subgroup_objects) do
+    start_many([{:interleaved, track, subgroup_objects}])
+  end
+
   def start_many(entries) when is_list(entries) and entries != [] do
     {:ok, network} = Support.start_network()
     parent = self()
@@ -66,6 +70,22 @@ defmodule Membrane.MOQX.TestPublisher do
   end
 
   defp serve_subscriptions(ctx, _conn, _control, []), do: {:ok, ctx}
+
+  defp serve_subscriptions(
+         ctx,
+         conn,
+         control,
+         [{:interleaved, track, subgroup_objects} | rest]
+       ) do
+    with {:ok, subscribe, ctx} <- receive_subscribe(ctx, control),
+         :ok <- validate_track(subscribe, track),
+         {:ok, ctx} <- accept_subscription(ctx, control, subscribe.request_id),
+         {:ok, ctx} <-
+           send_interleaved_subgroups(ctx, conn, subscribe.request_id, subgroup_objects),
+         {:ok, ctx} <- finish_subscription(ctx, control, subscribe.request_id, 2) do
+      serve_subscriptions(ctx, conn, control, rest)
+    end
+  end
 
   defp serve_subscriptions(ctx, conn, control, [{track, objects} | rest]) do
     with {:ok, subscribe, ctx} <- receive_subscribe(ctx, control),
@@ -145,6 +165,50 @@ defmodule Membrane.MOQX.TestPublisher do
         {:error, reason, ctx} -> {:halt, {:error, reason, ctx}}
       end
     end)
+  end
+
+  defp send_interleaved_subgroups(
+         ctx,
+         conn,
+         track_alias,
+         [{first, second}, other]
+       ) do
+    first_bytes = subgroup_bytes(track_alias, first, true)
+    second_bytes = subgroup_bytes(track_alias, second, true)
+    other_bytes = subgroup_bytes(track_alias, other, false)
+    first_continuation = subgroup_object_bytes(second_bytes)
+
+    with {:ok, first_stream, ctx} <-
+           Transport.open_stream(ctx, conn, direction: :unidirectional),
+         {:ok, second_stream, ctx} <-
+           Transport.open_stream(ctx, conn, direction: :unidirectional),
+         {:ok, _send, ctx} <- Transport.send_stream(ctx, first_stream, first_bytes),
+         {:ok, _send, ctx} <-
+           Transport.send_stream(ctx, second_stream, other_bytes, finish: true),
+         :ok <- wait_for_peer_to_process_subgroup_end(),
+         {:ok, _send, ctx} <-
+           Transport.send_stream(ctx, first_stream, first_continuation, finish: true),
+         :ok <- wait_for_peer_to_process_subgroup_end() do
+      {:ok, ctx}
+    end
+  end
+
+  defp wait_for_peer_to_process_subgroup_end do
+    receive do
+    after
+      50 -> :ok
+    end
+  end
+
+  defp subgroup_bytes(track_alias, object, end_of_group?) do
+    <<type, rest::binary>> = Codec.encode_subgroup(track_alias, object)
+    type = if end_of_group?, do: Bitwise.bor(type, 0x08), else: type
+    <<type, rest::binary>>
+  end
+
+  defp subgroup_object_bytes(bytes) do
+    {:ok, _header, object_bytes} = Codec.decode_subgroup_header(bytes)
+    object_bytes
   end
 
   defp finish_subscription(ctx, control, request_id, stream_count) do

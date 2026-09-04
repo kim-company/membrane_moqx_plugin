@@ -168,9 +168,9 @@ defmodule Membrane.MOQX.Sink do
 
       true ->
         with :ok <-
-               finish_track_subscriptions(
-                 state,
-                 pad_state.options.track_name,
+               MOQX.withdraw_track(
+                 state.client,
+                 pad_state.media_track,
                  status: :track_ended,
                  reason: "track removed"
                ),
@@ -403,9 +403,9 @@ defmodule Membrane.MOQX.Sink do
     state = put_in(state, [:pads, pad], pad_state)
 
     with :ok <-
-           finish_track_subscriptions(
-             state,
-             pad_state.options.track_name,
+           MOQX.withdraw_track(
+             state.client,
+             pad_state.media_track,
              status: :track_ended,
              reason: "track ended"
            ),
@@ -994,20 +994,6 @@ defmodule Membrane.MOQX.Sink do
     Enum.find_value(state.active_subscriptions, fn
       {published_subscription, %{identity: ^request_handle}} -> published_subscription
       _entry -> nil
-    end)
-  end
-
-  defp finish_track_subscriptions(state, track_name, options) do
-    options = finish_subscription_options(state, options)
-
-    state.active_subscriptions
-    |> Enum.filter(fn {_subscription, active} -> active.track_name == track_name end)
-    |> Enum.reduce_while(:ok, fn {published_subscription, _active}, :ok ->
-      case MOQX.finish_subscription(state.client, published_subscription, options) do
-        :ok -> {:cont, :ok}
-        {:error, :stale_published_subscription} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
     end)
   end
 
