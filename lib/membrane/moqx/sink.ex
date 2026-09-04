@@ -24,11 +24,32 @@ defmodule Membrane.MOQX.Sink do
   datagram delivery per pad, and refreshes its retained catalog for late
   discovery. Cloudflare draft-14 preserves `.catalog`, separate initialization
   tracks, and subgroup-only publication. Protocol selection is always explicit.
+
+  MoQ Lite draft-05 is exact-track and catalog-free. Each Lite input pad must
+  provide a positive `timescale`; it may also set track-specific
+  `publisher_priority`, `publisher_max_latency`, retention, and reliable
+  subgroup delivery. PTS is rounded to the nearest track tick (exact halves
+  round up) and must be non-negative and non-decreasing.
+
+      child(:producer, producer)
+      |> via_in(Pad.ref(:input, :opus),
+        options: [track_name: "opus", timescale: 48_000, retention: :live]
+      )
+      |> child(:sink, %Membrane.MOQX.Sink{
+        endpoint: "moql://cdn.moq.dev:443",
+        protocol: :moq_lite_05,
+        namespace: ["speech"],
+        inbound_subscriptions: :controlled,
+        track_demand_events: true
+      })
+
+  MoQ Lite does not imply HANG payload or catalog compatibility; media framing
+  remains an application concern outside this Sink.
   """
 
   use Membrane.Sink
 
-  alias Membrane.MOQX.{ProtocolConventions, Track, Unit}
+  alias Membrane.MOQX.{ProtocolConventions, Timestamp, Track, Unit}
 
   def_input_pad :input,
     availability: :on_request,
@@ -38,7 +59,10 @@ defmodule Membrane.MOQX.Sink do
       track_name: [spec: binary(), required: true],
       init_track_name: [spec: binary() | nil, default: nil],
       retention: [spec: :live | :latest | :all, default: :live],
-      delivery: [spec: :subgroup | :datagram, default: :subgroup]
+      delivery: [spec: :subgroup | :datagram, default: :subgroup],
+      timescale: [spec: pos_integer() | nil, default: nil],
+      publisher_priority: [spec: 0..255 | nil, default: nil],
+      publisher_max_latency: [spec: non_neg_integer(), default: 0]
     ]
 
   def_options endpoint: [spec: binary() | URI.t(), required: true],
@@ -118,6 +142,7 @@ defmodule Membrane.MOQX.Sink do
           generation: 0,
           group_id: 0,
           object_id: 0,
+          last_pts: nil,
           ended?: false
         }
 
@@ -223,7 +248,10 @@ defmodule Membrane.MOQX.Sink do
       ProtocolConventions.track_options(
         state.protocol,
         options.retention,
-        options.delivery
+        options.delivery,
+        timescale: options.timescale,
+        publisher_priority: options.publisher_priority || state.publisher_priority,
+        publisher_max_latency: options.publisher_max_latency
       )
 
     case approved_reactive_request(state, options.track_name) do
@@ -326,7 +354,8 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp approved_reactive_request(state, track_name) do
-    if ProtocolConventions.draft_16?(state.protocol) do
+    if ProtocolConventions.draft_16?(state.protocol) or
+         ProtocolConventions.moq_lite_05?(state.protocol) do
       Enum.find_value(state.pending_subscription_requests, fn
         {_handle, %{request: %{track: %{track: ^track_name}} = request, status: :approved}} ->
           request
@@ -412,7 +441,12 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp prepare_initialization(state, _name, _track)
-       when state.protocol in [:draft_16, MOQX.Protocol.Draft16] do
+       when state.protocol in [
+              :draft_16,
+              MOQX.Protocol.Draft16,
+              :moq_lite_05,
+              MOQX.Protocol.MOQLite05
+            ] do
     {:ok, nil, nil}
   end
 
@@ -438,20 +472,34 @@ defmodule Membrane.MOQX.Sink do
 
   defp publish_buffer(pad, buffer, pad_state, state) do
     with {:ok, unit} <- Unit.from_buffer(buffer),
+         {:ok, timestamp} <- object_timestamp(buffer, pad_state, state),
          :ok <-
            MOQX.publish_object(state.client, pad_state.media_track, %MOQX.Object{
              group_id: pad_state.group_id,
              subgroup_id: 0,
              object_id: pad_state.object_id,
+             timestamp: timestamp,
              publisher_priority: state.publisher_priority,
              end_of_group?: unit.group_end?,
              payload: buffer.payload
            }) do
-      pad_state = advance_coordinates(pad_state, unit.group_end?)
+      pad_state =
+        pad_state
+        |> Map.put(:last_pts, buffer.pts)
+        |> advance_coordinates(unit.group_end?)
+
       {[], put_in(state, [:pads, pad], pad_state)}
     else
       {:error, reason} -> raise "failed to publish MOQX object: #{inspect(reason)}"
     end
+  end
+
+  defp object_timestamp(_buffer, _pad_state, state)
+       when state.protocol not in [:moq_lite_05, MOQX.Protocol.MOQLite05],
+       do: {:ok, nil}
+
+  defp object_timestamp(buffer, pad_state, _state) do
+    Timestamp.from_membrane_time(buffer.pts, pad_state.options.timescale, pad_state.last_pts)
   end
 
   @impl true
@@ -517,6 +565,8 @@ defmodule Membrane.MOQX.Sink do
         {[notify_parent: notification], state}
 
       published_subscription ->
+        options = finish_subscription_options(state, options)
+
         case MOQX.finish_subscription(state.client, published_subscription, options) do
           :ok ->
             {[], state}
@@ -536,25 +586,10 @@ defmodule Membrane.MOQX.Sink do
         _ctx,
         %{client: client, publication: publication} = state
       ) do
-    options =
-      ProtocolConventions.track_options(state.protocol, :latest, :subgroup)
-
-    case MOQX.add_track(client, publication, state.catalog_track_name, options) do
-      {:ok, catalog_track} ->
-        state = %{
-          state
-          | catalog_track: catalog_track,
-            catalog_ready?: not ProtocolConventions.draft_16?(state.protocol)
-        }
-
-        if state.catalog_ready? do
-          publication_became_ready(state)
-        else
-          {[], state}
-        end
-
-      {:error, reason} ->
-        raise "failed to register MOQX catalog track: #{inspect(reason)}"
+    if ProtocolConventions.moq_lite_05?(state.protocol) do
+      publication_became_ready(%{state | catalog_ready?: true})
+    else
+      register_catalog_track(client, publication, state)
     end
   end
 
@@ -677,6 +712,29 @@ defmodule Membrane.MOQX.Sink do
   end
 
   def handle_info(_message, _ctx, state), do: {[], state}
+
+  defp register_catalog_track(client, publication, state) do
+    options = ProtocolConventions.track_options(state.protocol, :latest, :subgroup)
+
+    case MOQX.add_track(client, publication, state.catalog_track_name, options) do
+      {:ok, catalog_track} ->
+        state = %{
+          state
+          | catalog_track: catalog_track,
+            catalog_ready?: not ProtocolConventions.draft_16?(state.protocol)
+        }
+
+        catalog_track_registered(state)
+
+      {:error, reason} ->
+        raise "failed to register MOQX catalog track: #{inspect(reason)}"
+    end
+  end
+
+  defp catalog_track_registered(%{catalog_ready?: true} = state),
+    do: publication_became_ready(state)
+
+  defp catalog_track_registered(state), do: {[], state}
 
   defp subscriber_joined(track, published_subscription, request_id, state) do
     track_name = published_track_name(track)
@@ -940,6 +998,8 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp finish_track_subscriptions(state, track_name, options) do
+    options = finish_subscription_options(state, options)
+
     state.active_subscriptions
     |> Enum.filter(fn {_subscription, active} -> active.track_name == track_name end)
     |> Enum.reduce_while(:ok, fn {published_subscription, _active}, :ok ->
@@ -950,6 +1010,12 @@ defmodule Membrane.MOQX.Sink do
       end
     end)
   end
+
+  defp finish_subscription_options(state, _options)
+       when state.protocol in [:moq_lite_05, MOQX.Protocol.MOQLite05],
+       do: []
+
+  defp finish_subscription_options(_state, options), do: options
 
   defp track_demand_actions(%{track_demand_events: false}, _track_name, _previous, _count),
     do: []
@@ -991,7 +1057,12 @@ defmodule Membrane.MOQX.Sink do
   defp init_track_name(%{init_track_name: name}), do: name
 
   defp resolved_init_track_name(_options, state)
-       when state.protocol in [:draft_16, MOQX.Protocol.Draft16],
+       when state.protocol in [
+              :draft_16,
+              MOQX.Protocol.Draft16,
+              :moq_lite_05,
+              MOQX.Protocol.MOQLite05
+            ],
        do: nil
 
   defp resolved_init_track_name(options, _state), do: init_track_name(options)
@@ -1007,7 +1078,8 @@ defmodule Membrane.MOQX.Sink do
         resolved_init_track_name(pad_state.options, state)
       end)
 
-    with :ok <-
+    with :ok <- validate_lite_pad_options(options, state),
+         :ok <-
            validate_media_track_name(
              track_name,
              state.catalog_track_name,
@@ -1021,6 +1093,23 @@ defmodule Membrane.MOQX.Sink do
         media_names,
         init_names
       )
+    end
+  end
+
+  defp validate_lite_pad_options(options, state) do
+    if ProtocolConventions.moq_lite_05?(state.protocol) do
+      cond do
+        not is_integer(options.timescale) or options.timescale <= 0 ->
+          {:error, :invalid_timescale}
+
+        options.delivery != :subgroup ->
+          {:error, {:unsupported_delivery, options.delivery}}
+
+        true ->
+          :ok
+      end
+    else
+      :ok
     end
   end
 
@@ -1060,15 +1149,21 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp publish_end_of_track(state, pad_state) do
-    MOQX.publish_object(state.client, pad_state.media_track, %MOQX.Object{
-      group_id: pad_state.group_id,
-      subgroup_id: 0,
-      object_id: pad_state.object_id,
-      publisher_priority: state.publisher_priority,
-      status: :end_of_track,
-      payload: <<>>
-    })
+    if ProtocolConventions.moq_lite_05?(state.protocol) do
+      :ok
+    else
+      MOQX.publish_object(state.client, pad_state.media_track, %MOQX.Object{
+        group_id: pad_state.group_id,
+        subgroup_id: 0,
+        object_id: pad_state.object_id,
+        publisher_priority: state.publisher_priority,
+        status: :end_of_track,
+        payload: <<>>
+      })
+    end
   end
+
+  defp publish_catalog(state) when is_nil(state.catalog_track_name), do: {:ok, state}
 
   defp publish_catalog(state) do
     payload =

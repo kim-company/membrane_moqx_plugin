@@ -82,6 +82,29 @@ defmodule Membrane.MOQX.ProtocolConventionsTest do
            }
   end
 
+  test "MoQ Lite draft-05 uses exact tracks with no catalog or initialization track" do
+    assert ProtocolConventions.moq_lite_05?(:moq_lite_05)
+    assert ProtocolConventions.moq_lite_05?(MOQX.Protocol.MOQLite05)
+    assert ProtocolConventions.catalog_track_name(:moq_lite_05, nil) == nil
+    assert ProtocolConventions.initialization_mode(:moq_lite_05) == :none
+    assert ProtocolConventions.catalog(:moq_lite_05, ["live"], [{"video", nil, @track}]) == nil
+
+    assert ProtocolConventions.track_options(
+             :moq_lite_05,
+             :latest,
+             :subgroup,
+             timescale: 48_000,
+             publisher_priority: 17,
+             publisher_max_latency: 1_000
+           ) == [
+             retention: :latest,
+             delivery: :subgroup,
+             timescale: 48_000,
+             publisher_priority: 17,
+             publisher_max_latency: 1_000
+           ]
+  end
+
   test "an explicit catalog track override wins without endpoint inference" do
     assert ProtocolConventions.catalog_track_name(:draft_16, ".custom") == ".custom"
     assert ProtocolConventions.catalog_track_name(:cloudflare_draft_14, "custom") == "custom"

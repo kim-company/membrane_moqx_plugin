@@ -40,6 +40,7 @@ defmodule Membrane.MOQX.SinkTest do
     TestControlledSource,
     TestDraft16Relay,
     TestDynamicSource,
+    TestLite05Relay,
     TestRelay
   }
 
@@ -47,6 +48,244 @@ defmodule Membrane.MOQX.SinkTest do
   alias Membrane.Testing
 
   require Pad
+
+  test "publishes MoQ Lite timestamps and emits demand only for the exact media track" do
+    namespace = ["live"]
+
+    track_info = %MOQX.Protocol.MOQLite05.Messages.TrackInfo{
+      timescale: 48_000,
+      publisher_priority: 17,
+      publisher_ordered: false,
+      publisher_max_latency: 1_000
+    }
+
+    relay =
+      TestLite05Relay.start(
+        namespace,
+        "audio",
+        track_info,
+        [{48_000, "first"}, {960, "second"}]
+      )
+
+    stream_format = %Membrane.MOQX.Track{packaging: "opus", initialization: nil}
+
+    spec =
+      child(:source, %TestControlledSource{stream_format: stream_format})
+      |> via_in(Pad.ref(:input, :audio),
+        options: [
+          track_name: "audio",
+          retention: :all,
+          timescale: 48_000,
+          publisher_priority: 17,
+          publisher_max_latency: 1_000
+        ]
+      )
+      |> child(:sink, %Sink{
+        endpoint: relay.endpoint,
+        protocol: :moq_lite_05,
+        namespace: namespace,
+        transport: TestLite05Relay.transport(relay),
+        track_demand_events: true
+      })
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    assert_pipeline_notified(pipeline, :sink, {:track_ready, Pad.ref(:input, :audio), "audio"})
+
+    assert {:ok,
+            %MOQX.Protocol.MOQLite05.Messages.TrackInfo{
+              timescale: 48_000,
+              publisher_priority: 17,
+              publisher_max_latency: 1_000
+            }} = TestLite05Relay.subscribe(relay)
+
+    assert_pipeline_notified(pipeline, :sink, {:subscriber_joined, "audio", 42, 1})
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: true, subscriber_count: 1}}
+    )
+
+    buffers = [
+      %Buffer{
+        payload: "first",
+        pts: 1_000_000_000,
+        metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: false}}
+      },
+      %Buffer{
+        payload: "second",
+        pts: 1_020_000_000,
+        metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+      }
+    ]
+
+    assert :ok = Testing.Pipeline.notify_child(pipeline, :source, {:publish, buffers})
+
+    assert {:ok, %{frames: [{48_000, "first"}, {960, "second"}]}} =
+             TestLite05Relay.capture(relay)
+
+    assert :ok = TestLite05Relay.unsubscribe(relay)
+    assert_pipeline_notified(pipeline, :sink, {:subscriber_left, "audio", 42, 0})
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: false, subscriber_count: 0}}
+    )
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Relay.await_shutdown(relay)
+  end
+
+  test "finishes a MoQ Lite subscriber cleanly when its media pad reaches EOS" do
+    namespace = ["live", "eos"]
+
+    track_info = %MOQX.Protocol.MOQLite05.Messages.TrackInfo{
+      timescale: 1_000,
+      publisher_priority: 127,
+      publisher_ordered: false,
+      publisher_max_latency: 0
+    }
+
+    relay =
+      TestLite05Relay.start(namespace, "captions", track_info, [{1_000, "caption"}],
+        completion: :publisher
+      )
+
+    stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
+
+    spec =
+      child(:source, %TestControlledSource{stream_format: stream_format})
+      |> via_in(Pad.ref(:input, :captions),
+        options: [track_name: "captions", timescale: 1_000]
+      )
+      |> child(:sink, %Sink{
+        endpoint: relay.endpoint,
+        protocol: :moq_lite_05,
+        namespace: namespace,
+        transport: TestLite05Relay.transport(relay),
+        track_demand_events: true
+      })
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    assert_pipeline_notified(pipeline, :sink, {:track_ready, _, "captions"})
+    assert {:ok, ^track_info} = TestLite05Relay.subscribe(relay)
+    assert_pipeline_notified(pipeline, :source, {:track_demand, :output, %{active?: true}})
+
+    buffer = %Buffer{
+      payload: "caption",
+      pts: 1_000_000_000,
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    assert :ok = Testing.Pipeline.notify_child(pipeline, :source, {:publish, [buffer]})
+    assert {:ok, _capture} = TestLite05Relay.capture(relay)
+    assert :ok = Testing.Pipeline.notify_child(pipeline, :source, :end_of_stream)
+    assert :ok = TestLite05Relay.await_publisher_finish(relay)
+    assert_pipeline_notified(pipeline, :source, {:track_demand, :output, %{active?: false}})
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Relay.await_shutdown(relay)
+  end
+
+  test "provisions a controlled MoQ Lite subscription when its dynamic pad appears" do
+    namespace = ["live", "reactive"]
+
+    track_info = %MOQX.Protocol.MOQLite05.Messages.TrackInfo{
+      timescale: 1_000,
+      publisher_priority: 23,
+      publisher_ordered: false,
+      publisher_max_latency: 250
+    }
+
+    relay =
+      TestLite05Relay.start(namespace, "events", track_info, [{500, "event"}],
+        mode: :controlled_reactive
+      )
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :moq_lite_05,
+            namespace: namespace,
+            transport: TestLite05Relay.transport(relay),
+            inbound_subscriptions: :controlled,
+            track_demand_events: true
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    assert :ok = TestLite05Relay.request_subscription(relay)
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscription_requested, %MOQX.PublicationSubscriptionRequest{} = request}
+    )
+
+    assert :ok = Testing.Pipeline.notify_child(pipeline, :sink, {:accept_subscription, request})
+
+    stream_format = %Membrane.MOQX.Track{packaging: "json", initialization: nil}
+
+    link =
+      child(:source, %TestControlledSource{stream_format: stream_format})
+      |> via_in(Pad.ref(:input, :events),
+        options: [
+          track_name: "events",
+          timescale: 1_000,
+          publisher_priority: 23,
+          publisher_max_latency: 250
+        ]
+      )
+      |> get_child(:sink)
+
+    assert :ok = Testing.Pipeline.execute_actions(pipeline, spec: link)
+    assert_pipeline_notified(pipeline, :sink, {:track_ready, Pad.ref(:input, :events), "events"})
+
+    assert_pipeline_notified(
+      pipeline,
+      :sink,
+      {:subscriber_joined, "events", request_handle, 1}
+    )
+
+    assert request_handle == request.handle
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: true, subscriber_count: 1}}
+    )
+
+    assert {:ok, ^track_info} = TestLite05Relay.request_track_info(relay)
+
+    buffer = %Buffer{
+      payload: "event",
+      pts: 500_000_000,
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    assert :ok = Testing.Pipeline.notify_child(pipeline, :source, {:publish, [buffer]})
+    assert {:ok, %{frames: [{500, "event"}]}} = TestLite05Relay.capture(relay)
+    assert :ok = TestLite05Relay.unsubscribe(relay)
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_demand, :output,
+       %Membrane.MOQX.Event.TrackDemand{active?: false, subscriber_count: 0}}
+    )
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Relay.await_shutdown(relay)
+  end
 
   test "waits for draft-16 track readiness and publishes Moqtail catalogs without false demand" do
     namespace = ["operator", "camera"]

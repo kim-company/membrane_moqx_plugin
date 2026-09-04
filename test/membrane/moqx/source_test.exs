@@ -5,7 +5,7 @@ defmodule Membrane.MOQX.SourceTest do
   import Membrane.Testing.Assertions
 
   alias Membrane.Buffer
-  alias Membrane.MOQX.{Session, Source, TestPublisher, Track, Unit}
+  alias Membrane.MOQX.{Session, Source, TestLite05Publisher, TestPublisher, Track, Unit}
   alias Membrane.Testing
 
   test "subscribes to one track and emits canonical buffers with received coordinates" do
@@ -168,5 +168,51 @@ defmodule Membrane.MOQX.SourceTest do
     assert Process.alive?(session)
     assert :ok = Session.close(session)
     assert :ok = TestPublisher.await_shutdown(publisher)
+  end
+
+  test "uses the MoQ Lite track timescale and frame timestamps for buffer PTS" do
+    track_ref = %MOQX.TrackRef{namespace: ["live"], track: "opus"}
+    stream_format = %Track{packaging: "opus", initialization: nil}
+
+    publisher = TestLite05Publisher.start(track_ref, 48_000, [{48_000, "first"}, {960, "second"}])
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    spec =
+      child(:source, %Source{
+        endpoint: publisher.endpoint,
+        protocol: :moq_lite_05,
+        track: track_ref,
+        stream_format: stream_format,
+        transport: TestLite05Publisher.transport(publisher)
+      })
+      |> child(:sink, %Testing.Sink{})
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_sink_buffer(
+      pipeline,
+      :sink,
+      %Buffer{
+        payload: "first",
+        pts: 1_000_000_000,
+        metadata: %{moqx: %Unit{publisher_priority: 17}}
+      }
+    )
+
+    TestLite05Publisher.finish_group(publisher)
+
+    assert_receive {Testing.Pipeline, ^pipeline,
+                    {:handle_child_notification,
+                     {{:buffer, %Buffer{payload: "second"} = second}, :sink}}}
+
+    assert second.pts == 1_020_000_000
+    TestLite05Publisher.finish_subscription(publisher)
+    assert_end_of_stream(pipeline, :sink)
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Publisher.await_shutdown(publisher)
   end
 end
