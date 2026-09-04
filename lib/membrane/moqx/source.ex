@@ -7,7 +7,9 @@ defmodule Membrane.MOQX.Source do
   Objects preserve order within each subgroup. Interleaved subgroup streams
   become eligible independently when their own subgroup advances or completes.
 
-  `protocol` is explicit and never inferred from the endpoint.
+  `protocol` is explicit and never inferred from the endpoint. A Source using
+  a shared `Membrane.MOQX.Session` must select the same protocol as the Session;
+  setup fails before subscribing when they differ.
   `subscription_options` pass through to `MOQX.subscribe/3`, including
   protocol-neutral start/filter, priority, group order, delivery timeout, and
   extension parameters supported by the selected MOQX implementation.
@@ -28,6 +30,7 @@ defmodule Membrane.MOQX.Source do
   use Membrane.Source
 
   alias Membrane.MOQX.{ProtocolConventions, Session, Timestamp, Track, Unit}
+  alias MOQX.Protocol.Resolver
 
   def_output_pad :output,
     flow_control: :push,
@@ -327,8 +330,18 @@ defmodule Membrane.MOQX.Source do
   defp put_if_present(options, key, value), do: Keyword.put(options, key, value)
 
   defp validate_connection_options(%{session: session, protocol: protocol})
-       when is_pid(session) and not is_nil(protocol),
-       do: :ok
+       when is_pid(session) and not is_nil(protocol) do
+    session_protocol = Session.protocol(session)
+
+    with {:ok, source_module} <- Resolver.fetch(protocol),
+         {:ok, session_module} <- Resolver.fetch(session_protocol),
+         true <- source_module == session_module do
+      :ok
+    else
+      _mismatch ->
+        {:error, {:session_protocol_mismatch, %{source: protocol, session: session_protocol}}}
+    end
+  end
 
   defp validate_connection_options(%{endpoint: endpoint, protocol: protocol})
        when (is_binary(endpoint) or is_struct(endpoint, URI)) and not is_nil(protocol),

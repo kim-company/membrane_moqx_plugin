@@ -10,6 +10,8 @@ defmodule Membrane.MOQX.CatalogSource do
   `catalog` for draft-16 and `.catalog` for Cloudflare draft-14. Draft-16
   inline CMSF initialization is preserved in the offered stream format;
   Cloudflare `initTrack` values retain their separate subscription path.
+  MoQ Lite 05 is catalog-free and must use `Membrane.MOQX.Source` with an
+  exact track instead.
   """
 
   use Membrane.Bin
@@ -39,12 +41,19 @@ defmodule Membrane.MOQX.CatalogSource do
 
   @impl true
   def handle_init(_ctx, options) do
+    catalog_track_name =
+      ProtocolConventions.catalog_track_name(options.protocol, options.catalog_track_name)
+
+    if is_nil(catalog_track_name) do
+      raise ArgumentError,
+            "CatalogSource does not support catalog-free protocol #{inspect(options.protocol)}; " <>
+              "use Source with an exact track"
+    end
+
     state =
       options
       |> Map.from_struct()
-      |> Map.update!(:catalog_track_name, fn override ->
-        ProtocolConventions.catalog_track_name(options.protocol, override)
-      end)
+      |> Map.put(:catalog_track_name, catalog_track_name)
       |> Map.merge(%{
         session: nil,
         catalog_subscription: nil,

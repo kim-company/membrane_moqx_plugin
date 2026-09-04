@@ -28,6 +28,43 @@ defmodule Membrane.MOQX.SourceTest do
     end
   end
 
+  test "rejects a protocol that does not match the shared session" do
+    track_ref = %MOQX.TrackRef{namespace: ["live", "protocol-mismatch"], track: "captions"}
+
+    publisher =
+      TestPublisher.start(track_ref, [
+        %MOQX.Object{group_id: 0, subgroup_id: 0, object_id: 0, payload: "unused"}
+      ])
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    {:ok, session} =
+      Session.start_link(
+        endpoint: publisher.endpoint,
+        protocol: :cloudflare_draft_14,
+        transport: TestPublisher.transport(publisher)
+      )
+
+    on_exit(fn ->
+      if Process.alive?(session), do: Session.close(session)
+    end)
+
+    options = %Source{
+      session: session,
+      protocol: :draft_16,
+      track: track_ref,
+      stream_format: %Track{packaging: "webvtt", initialization: nil}
+    }
+
+    {[], state} = Source.handle_init(nil, options)
+
+    assert_raise RuntimeError, ~r/session_protocol_mismatch/, fn ->
+      Source.handle_setup(nil, state)
+    end
+  end
+
   test "subscribes to one track and emits canonical buffers with received coordinates" do
     track_ref = %MOQX.TrackRef{namespace: ["live", "source"], track: "captions"}
 

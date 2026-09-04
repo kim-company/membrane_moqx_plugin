@@ -19,6 +19,18 @@ defmodule Membrane.MOQX.CatalogSourceTest do
 
   require Pad
 
+  test "rejects catalog-free MoQ Lite at the option boundary" do
+    options = %CatalogSource{
+      endpoint: "moql://localhost:443",
+      protocol: :moq_lite_05,
+      namespace: ["live"]
+    }
+
+    assert_raise ArgumentError, ~r/CatalogSource does not support catalog-free protocol/, fn ->
+      CatalogSource.handle_init(nil, options)
+    end
+  end
+
   test "uses the draft-16 catalog convention and preserves inline initialization" do
     namespace = ["moqtail", "pipeline"]
     media_ref = %MOQX.TrackRef{namespace: namespace, track: "video"}

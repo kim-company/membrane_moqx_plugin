@@ -31,6 +31,10 @@ defmodule Membrane.MOQX.Session do
     GenServer.call(session, {:unsubscribe, subscription})
   end
 
+  @doc "Returns the explicit protocol selection owned by the session."
+  @spec protocol(pid()) :: atom() | module()
+  def protocol(session), do: GenServer.call(session, :protocol)
+
   @spec close(pid()) :: :ok
   def close(session), do: GenServer.call(session, :close)
 
@@ -54,6 +58,7 @@ defmodule Membrane.MOQX.Session do
         {:ok,
          %{
            client: client,
+           protocol: protocol,
            subscriptions: %{},
            monitors: %{},
            closed?: false
@@ -65,6 +70,8 @@ defmodule Membrane.MOQX.Session do
   end
 
   @impl true
+  def handle_call(:protocol, _from, state), do: {:reply, state.protocol, state}
+
   def handle_call({:subscribe, track, options}, {owner, _tag}, state) do
     {catalog?, options} = Keyword.pop(options, :catalog?, false)
 
