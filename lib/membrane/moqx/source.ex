@@ -4,23 +4,40 @@ defmodule Membrane.MOQX.Source do
 
   Payload bytes remain unchanged. Received MOQ coordinates, priority, status,
   and inferred group boundaries are stored in Membrane.MOQX.Unit metadata.
+  Objects preserve order within each subgroup. Interleaved subgroup streams
+  become eligible independently when their own subgroup advances or completes.
 
-  `protocol` is explicit and never inferred from the endpoint.
+  `protocol` is explicit and never inferred from the endpoint. A Source using
+  a shared `Membrane.MOQX.Session` must select the same protocol as the Session;
+  setup fails before subscribing when they differ.
   `subscription_options` pass through to `MOQX.subscribe/3`, including
   protocol-neutral start/filter, priority, group order, delivery timeout, and
   extension parameters supported by the selected MOQX implementation.
+
+  For `:moq_lite_05`, the Source converts each frame timestamp from the
+  immutable track timescale into Membrane nanoseconds. The timestamp is
+  independent of group and object coordinates; payload bytes and group
+  boundaries remain unchanged.
+
+      child(:source, %Membrane.MOQX.Source{
+        endpoint: "moql://cdn.moq.dev:443",
+        protocol: :moq_lite_05,
+        track: %MOQX.TrackRef{namespace: ["speech"], track: "opus"},
+        stream_format: %Membrane.MOQX.Track{packaging: "opus", initialization: nil}
+      })
   """
 
   use Membrane.Source
 
-  alias Membrane.MOQX.{Session, Track, Unit}
+  alias Membrane.MOQX.{ProtocolConventions, Session, Timestamp, Track, Unit}
+  alias MOQX.Protocol.Resolver
 
   def_output_pad :output,
     flow_control: :push,
     accepted_format: %Track{}
 
   def_options endpoint: [spec: binary() | URI.t() | nil, default: nil],
-              protocol: [spec: atom() | module() | nil, default: nil],
+              protocol: [spec: atom() | module(), required: true],
               session: [spec: pid() | nil, default: nil],
               track: [spec: MOQX.TrackRef.t(), required: true],
               stream_format: [spec: Track.t(), required: true],
@@ -41,9 +58,11 @@ defmodule Membrane.MOQX.Source do
         subscription: nil,
         accepted?: false,
         playing?: false,
-        pending_object: nil,
+        pending_objects: %{},
         queued_events: [],
         initial_group: nil,
+        track_timescale: nil,
+        track_publisher_priority: nil,
         ended?: false
       })
 
@@ -79,7 +98,10 @@ defmodule Membrane.MOQX.Source do
   def handle_info(_message, _ctx, state), do: {[], state}
 
   defp handle_event(
-         %MOQX.Event.SubscriptionAccepted{subscription: subscription},
+         %MOQX.Event.SubscriptionAccepted{
+           subscription: subscription,
+           track_info: track_info
+         },
          _ctx,
          %{subscription: subscription} = state
        ) do
@@ -88,7 +110,16 @@ defmodule Membrane.MOQX.Source do
       notify_parent: {:subscription_ready, state.track}
     ]
 
-    {actions, %{state | accepted?: true}}
+    timescale = if track_info, do: track_info.timescale
+    publisher_priority = if track_info, do: track_info.publisher_priority
+
+    {actions,
+     %{
+       state
+       | accepted?: true,
+         track_timescale: timescale,
+         track_publisher_priority: publisher_priority
+     }}
   end
 
   defp handle_event(
@@ -118,6 +149,14 @@ defmodule Membrane.MOQX.Source do
          %{subscription: subscription} = state
        ) do
     consume_or_queue({:subscription_done, completion}, state)
+  end
+
+  defp handle_event(
+         %MOQX.Event.SubgroupEnded{subscription: subscription} = event,
+         _ctx,
+         %{subscription: subscription} = state
+       ) do
+    consume_or_queue({:subgroup_ended, event}, state)
   end
 
   defp handle_event(
@@ -169,27 +208,33 @@ defmodule Membrane.MOQX.Source do
     end)
   end
 
-  defp consume_event({:object, object}, %{pending_object: nil} = state) do
-    case start_object?(object, state) do
-      {true, state} -> {[], %{state | pending_object: object}}
-      {false, state} -> {[], state}
+  defp consume_event({:object, object}, state) do
+    key = object_subgroup_key(object, state)
+
+    case Map.pop(state.pending_objects, key) do
+      {nil, _pending_objects} ->
+        case start_object?(object, state) do
+          {true, state} -> {[], put_in(state, [:pending_objects, key], object)}
+          {false, state} -> {[], state}
+        end
+
+      {previous, pending_objects} ->
+        group_end? = object_ends_group?(previous, object)
+        action = {:buffer, {:output, object_buffer(previous, group_end?, state)}}
+        pending_objects = Map.put(pending_objects, key, object)
+        {[action], %{state | pending_objects: pending_objects}}
     end
-  end
-
-  defp consume_event({:object, object}, %{pending_object: previous} = state) do
-    group_end? =
-      previous.group_id != object.group_id or previous.status in [:end_of_group, :end_of_track]
-
-    action = {:buffer, {:output, object_buffer(previous, group_end?)}}
-    {[action], %{state | pending_object: object}}
   end
 
   defp consume_event({:subscription_done, completion}, %{ended?: false} = state) do
     buffer_actions =
-      case state.pending_object do
-        nil -> []
-        object -> [buffer: {:output, object_buffer(object, true)}]
-      end
+      state.pending_objects
+      |> Enum.sort_by(fn {_key, object} ->
+        {object.group_id, object.subgroup_id, object.object_id}
+      end)
+      |> Enum.map(fn {_key, object} ->
+        {:buffer, {:output, object_buffer(object, true, state)}}
+      end)
 
     notification = {:subscription_done, state.track, completion}
 
@@ -200,22 +245,66 @@ defmodule Membrane.MOQX.Source do
           end_of_stream: :output
         ]
 
-    {actions, %{state | pending_object: nil, ended?: true}}
+    {actions, %{state | pending_objects: %{}, ended?: true}}
   end
 
   defp consume_event({:subscription_done, _completion}, state), do: {[], state}
 
-  defp object_buffer(object, group_end?) do
+  defp consume_event(
+         {:subgroup_ended, event},
+         state
+       ) do
+    key = {event.group_id, event.subgroup_id}
+
+    case Map.pop(state.pending_objects, key) do
+      {nil, _pending_objects} ->
+        {[], state}
+
+      {object, pending_objects} ->
+        complete? = event.outcome == :complete and event.end_of_group?
+        actions = [buffer: {:output, object_buffer(object, complete?, state)}]
+        {actions, %{state | pending_objects: pending_objects}}
+    end
+  end
+
+  defp object_subgroup_key(%{group_id: group_id, subgroup_id: nil}, state) do
+    if ProtocolConventions.draft_16?(state.protocol),
+      do: :draft_16_datagram,
+      else: {group_id, nil}
+  end
+
+  defp object_subgroup_key(object, _state), do: {object.group_id, object.subgroup_id}
+
+  defp object_ends_group?(previous, next) do
+    previous.group_id != next.group_id or previous.end_of_group? == true or
+      previous.status in [:end_of_group, :end_of_track]
+  end
+
+  defp object_buffer(object, group_end?, state) do
     unit = %Unit{
       group_end?: group_end?,
       group_id: object.group_id,
       subgroup_id: object.subgroup_id,
       object_id: object.object_id,
-      publisher_priority: object.publisher_priority,
+      publisher_priority: object.publisher_priority || state.track_publisher_priority,
       status: object.status
     }
 
-    %Membrane.Buffer{payload: object.payload, metadata: %{moqx: unit}}
+    %Membrane.Buffer{
+      payload: object.payload,
+      pts: object_pts(object, state.track_timescale),
+      metadata: %{moqx: unit}
+    }
+  end
+
+  defp object_pts(%{timestamp: nil}, _timescale), do: nil
+  defp object_pts(_object, nil), do: nil
+
+  defp object_pts(object, timescale) do
+    case Timestamp.to_membrane_time(object.timestamp, timescale) do
+      {:ok, pts} -> pts
+      {:error, reason} -> raise "invalid MOQX object timestamp: #{inspect(reason)}"
+    end
   end
 
   defp start_object?(_object, %{start_policy: :current} = state), do: {true, state}
@@ -240,7 +329,19 @@ defmodule Membrane.MOQX.Source do
   defp put_if_present(options, _key, nil), do: options
   defp put_if_present(options, key, value), do: Keyword.put(options, key, value)
 
-  defp validate_connection_options(%{session: session}) when is_pid(session), do: :ok
+  defp validate_connection_options(%{session: session, protocol: protocol})
+       when is_pid(session) and not is_nil(protocol) do
+    session_protocol = Session.protocol(session)
+
+    with {:ok, source_module} <- Resolver.fetch(protocol),
+         {:ok, session_module} <- Resolver.fetch(session_protocol),
+         true <- source_module == session_module do
+      :ok
+    else
+      _mismatch ->
+        {:error, {:session_protocol_mismatch, %{source: protocol, session: session_protocol}}}
+    end
+  end
 
   defp validate_connection_options(%{endpoint: endpoint, protocol: protocol})
        when (is_binary(endpoint) or is_struct(endpoint, URI)) and not is_nil(protocol),

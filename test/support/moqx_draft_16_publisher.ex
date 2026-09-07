@@ -12,13 +12,21 @@ defmodule Membrane.MOQX.TestDraft16Publisher do
 
   defstruct [:task, :network, :endpoint]
 
-  def start(namespace, catalog, track_name, payload) do
+  def start(namespace, catalog, track_name, payload, opts \\ []) do
     {:ok, network} = Support.start_network()
     parent = self()
 
+    config = %{
+      namespace: namespace,
+      catalog: catalog,
+      track_name: track_name,
+      payload: payload,
+      opts: opts
+    }
+
     task =
       Task.async(fn ->
-        publish(parent, network, namespace, catalog, track_name, payload)
+        publish(parent, network, config)
       end)
 
     receive do
@@ -38,6 +46,17 @@ defmodule Membrane.MOQX.TestDraft16Publisher do
   end
 
   def publish_media(%__MODULE__{task: task}), do: send(task.pid, :publish_media)
+  def finish_media(%__MODULE__{task: task}), do: send(task.pid, :finish_media)
+
+  def await_datagrams(%__MODULE__{task: task}) do
+    pid = task.pid
+
+    receive do
+      {:datagrams_sent, ^pid} -> :ok
+    after
+      @timeout -> {:error, :datagrams_timeout}
+    end
+  end
 
   def await_shutdown(%__MODULE__{task: task}) do
     case Task.yield(task, @timeout) do
@@ -47,28 +66,58 @@ defmodule Membrane.MOQX.TestDraft16Publisher do
     end
   end
 
-  defp publish(parent, network, namespace, catalog, track_name, payload) do
+  defp publish(parent, network, config) do
     with {:ok, ctx} <- Transport.new(Support, network: network, profile: :draft_16),
          {:ok, listener, ctx} <- Transport.listen(ctx, 0),
          {:ok, {_ip, port}} <- Transport.local_address(ctx, listener) do
       send(parent, {:publisher_ready, port})
-      serve(ctx, listener, port, namespace, catalog, track_name, payload)
+      serve(ctx, listener, port, config, parent)
     end
   end
 
-  defp serve(ctx, listener, port, namespace, catalog, track_name, payload) do
+  defp serve(ctx, listener, port, config, parent) do
     with {:ok, conn, ctx} <- Transport.accept(ctx, listener, [], @timeout),
          {:ok, conn, ctx} <- Transport.handshake(ctx, conn, @timeout),
          {:ok, control, ctx} <- Transport.accept_stream(ctx, conn, [], @timeout),
          {:ok, ctx} <- receive_setup(ctx, control, port),
-         {:ok, ctx} <- accept_subscription(ctx, control, namespace, "catalog", 0, 7),
+         {:ok, ctx} <- accept_subscription(ctx, control, config.namespace, "catalog", 0, 7),
          {:ok, catalog_stream, ctx} <-
            Transport.open_stream(ctx, conn, direction: :unidirectional),
          {:ok, _send, ctx} <-
-           Transport.send_stream(ctx, catalog_stream, subgroup(7, 0, catalog)),
-         {:ok, ctx} <- accept_subscription(ctx, control, namespace, track_name, 2, 8),
+           Transport.send_stream(ctx, catalog_stream, subgroup(7, 0, config.catalog)),
+         {:ok, ctx} <-
+           accept_subscription(ctx, control, config.namespace, config.track_name, 2, 8),
          :ok <- await_publish(),
-         {:ok, media_stream, ctx} <-
+         {:ok, ctx} <- publish_objects(ctx, conn, config.payload, config.opts, parent),
+         {:ok, _send, ctx} <-
+           Transport.send_stream(ctx, control, Codec.publish_done(2, 2, 1, "track ended")),
+         {:ok, _event, _ctx} <- receive_connection_close(ctx, conn) do
+      :ok
+    end
+  end
+
+  defp publish_objects(ctx, conn, objects, [delivery: :datagram], parent) do
+    result =
+      Enum.reduce_while(objects, {:ok, ctx}, fn object, {:ok, ctx} ->
+        case Transport.send_datagram(ctx, conn, Codec.encode_datagram(8, object)) do
+          {:ok, ctx} -> {:cont, {:ok, ctx}}
+          error -> {:halt, error}
+        end
+      end)
+
+    with {:ok, ctx} <- result do
+      send(parent, {:datagrams_sent, self()})
+
+      receive do
+        :finish_media -> {:ok, ctx}
+      after
+        @close_timeout -> {:error, :finish_timeout}
+      end
+    end
+  end
+
+  defp publish_objects(ctx, conn, payload, _opts, _parent) do
+    with {:ok, media_stream, ctx} <-
            Transport.open_stream(ctx, conn, direction: :unidirectional),
          {:ok, _send, ctx} <-
            Transport.send_stream(
@@ -76,11 +125,8 @@ defmodule Membrane.MOQX.TestDraft16Publisher do
              media_stream,
              [subgroup(8, 1, payload), encode_varint(0), encode_bytes("later")],
              finish: true
-           ),
-         {:ok, _send, ctx} <-
-           Transport.send_stream(ctx, control, Codec.publish_done(2, 2, 1, "track ended")),
-         {:ok, _event, _ctx} <- receive_connection_close(ctx, conn) do
-      :ok
+           ) do
+      {:ok, ctx}
     end
   end
 

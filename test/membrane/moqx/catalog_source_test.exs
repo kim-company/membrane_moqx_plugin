@@ -19,6 +19,18 @@ defmodule Membrane.MOQX.CatalogSourceTest do
 
   require Pad
 
+  test "rejects catalog-free MoQ Lite at the option boundary" do
+    options = %CatalogSource{
+      endpoint: "moql://localhost:443",
+      protocol: :moq_lite_05,
+      namespace: ["live"]
+    }
+
+    assert_raise ArgumentError, ~r/CatalogSource does not support catalog-free protocol/, fn ->
+      CatalogSource.handle_init(nil, options)
+    end
+  end
+
   test "uses the draft-16 catalog convention and preserves inline initialization" do
     namespace = ["moqtail", "pipeline"]
     media_ref = %MOQX.TrackRef{namespace: namespace, track: "video"}
@@ -100,6 +112,84 @@ defmodule Membrane.MOQX.CatalogSourceTest do
     TestDraft16Publisher.publish_media(publisher)
     assert_sink_buffer(pipeline, :sink, %Buffer{payload: "fragment"})
 
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestDraft16Publisher.await_shutdown(publisher)
+  end
+
+  test "emits a completed draft-16 datagram group when the next group arrives" do
+    namespace = ["moqtail", "datagrams"]
+
+    catalog =
+      JSON.encode!(%{
+        "version" => 1,
+        "tracks" => [
+          %{
+            "name" => "video",
+            "role" => "video",
+            "packaging" => "cmaf",
+            "codec" => "avc1.42C01F",
+            "width" => 640,
+            "height" => 360,
+            "timescale" => 90_000
+          }
+        ]
+      })
+
+    objects = [
+      %MOQX.Object{group_id: 1, object_id: 0, payload: "first"},
+      %MOQX.Object{group_id: 2, object_id: 0, payload: "second"}
+    ]
+
+    publisher =
+      TestDraft16Publisher.start(namespace, catalog, "video", objects, delivery: :datagram)
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:source, %CatalogSource{
+            endpoint: publisher.endpoint,
+            protocol: :draft_16,
+            namespace: namespace,
+            transport: TestDraft16Publisher.transport(publisher)
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :source, :catalog_ready)
+
+    link =
+      get_child(:source)
+      |> via_out(Pad.ref(:output, :video),
+        options: [track: %MOQX.TrackRef{namespace: namespace, track: "video"}]
+      )
+      |> child(:sink, %Testing.Sink{})
+
+    assert :ok = Testing.Pipeline.execute_actions(pipeline, spec: link)
+
+    assert_pipeline_notified(
+      pipeline,
+      :source,
+      {:track_source, track_ref, {:subscription_ready, track_ref}}
+    )
+
+    TestDraft16Publisher.publish_media(publisher)
+    assert :ok = TestDraft16Publisher.await_datagrams(publisher)
+
+    assert_sink_buffer(
+      pipeline,
+      :sink,
+      %Buffer{
+        payload: "first",
+        metadata: %{
+          moqx: %Unit{group_id: 1, subgroup_id: nil, object_id: 0, group_end?: true}
+        }
+      }
+    )
+
+    TestDraft16Publisher.finish_media(publisher)
     assert :ok = Testing.Pipeline.terminate(pipeline)
     assert :ok = TestDraft16Publisher.await_shutdown(publisher)
   end

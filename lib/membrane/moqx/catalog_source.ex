@@ -10,6 +10,8 @@ defmodule Membrane.MOQX.CatalogSource do
   `catalog` for draft-16 and `.catalog` for Cloudflare draft-14. Draft-16
   inline CMSF initialization is preserved in the offered stream format;
   Cloudflare `initTrack` values retain their separate subscription path.
+  MoQ Lite 05 is catalog-free and must use `Membrane.MOQX.Source` with an
+  exact track instead.
   """
 
   use Membrane.Bin
@@ -39,12 +41,19 @@ defmodule Membrane.MOQX.CatalogSource do
 
   @impl true
   def handle_init(_ctx, options) do
+    catalog_track_name =
+      ProtocolConventions.catalog_track_name(options.protocol, options.catalog_track_name)
+
+    if is_nil(catalog_track_name) do
+      raise ArgumentError,
+            "CatalogSource does not support catalog-free protocol #{inspect(options.protocol)}; " <>
+              "use Source with an exact track"
+    end
+
     state =
       options
       |> Map.from_struct()
-      |> Map.update!(:catalog_track_name, fn override ->
-        ProtocolConventions.catalog_track_name(options.protocol, override)
-      end)
+      |> Map.put(:catalog_track_name, catalog_track_name)
       |> Map.merge(%{
         session: nil,
         catalog_subscription: nil,
@@ -90,7 +99,7 @@ defmodule Membrane.MOQX.CatalogSource do
 
     case stream_format do
       %Track{} ->
-        {spec, pad_state} = source_spec(pad, pad_state, state.session)
+        {spec, pad_state} = source_spec(pad, pad_state, state)
         {[request_action, spec: spec], put_in(state, [:pads, pad], pad_state)}
 
       nil ->
@@ -279,7 +288,7 @@ defmodule Membrane.MOQX.CatalogSource do
       {pad, %{track_ref: track_ref, child: nil, stream_format: nil} = pad_state}, {actions, state}
       when track_ref == offer.track_ref ->
         pad_state = %{pad_state | stream_format: offer.stream_format}
-        {spec, pad_state} = source_spec(pad, pad_state, state.session)
+        {spec, pad_state} = source_spec(pad, pad_state, state)
         {actions ++ [spec: spec], put_in(state, [:pads, pad], pad_state)}
 
       {_pad, _pad_state}, acc ->
@@ -287,12 +296,13 @@ defmodule Membrane.MOQX.CatalogSource do
     end)
   end
 
-  defp source_spec(pad, pad_state, session) do
+  defp source_spec(pad, pad_state, state) do
     child = {:track_source, pad}
 
     spec =
       child(child, %Source{
-        session: session,
+        session: state.session,
+        protocol: state.protocol,
         track: pad_state.track_ref,
         stream_format: pad_state.stream_format,
         start_policy: pad_state.options.start_policy,

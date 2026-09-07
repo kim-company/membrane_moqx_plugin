@@ -8,8 +8,8 @@ defmodule Membrane.MOQX.TestDynamicSource do
     flow_control: :push,
     accepted_format: _any
 
-  def_options stream_format: [spec: struct(), required: true],
-              buffer: [spec: Membrane.Buffer.t(), required: true]
+  def_options stream_format: [spec: struct() | nil, default: nil],
+              buffer: [spec: Membrane.Buffer.t() | nil, default: nil]
 
   @impl true
   def handle_init(_ctx, options), do: {[], options}
@@ -18,10 +18,16 @@ defmodule Membrane.MOQX.TestDynamicSource do
   def handle_playing(ctx, state) do
     actions =
       Enum.flat_map(Map.keys(ctx.pads), fn pad ->
-        [stream_format: {pad, state.stream_format}, buffer: {pad, state.buffer}]
+        if(state.stream_format, do: [stream_format: {pad, state.stream_format}], else: []) ++
+          if(state.buffer, do: [buffer: {pad, state.buffer}], else: [])
       end)
 
     {actions, state}
+  end
+
+  @impl true
+  def handle_parent_notification({:publish, pad, buffers}, _ctx, state) do
+    {[buffer: {pad, buffers}], state}
   end
 
   @impl true

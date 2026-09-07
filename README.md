@@ -3,9 +3,9 @@
 Membrane Framework Source and Sink elements for receiving and publishing
 arbitrary named object tracks through [`moqx`](https://github.com/dmorn/moqx).
 
-The plugin supports both standard MOQT draft-16 (including Moqtail's current
-CMSF workflow) and Cloudflare's deployed draft-14 implementation over native
-QUIC. Protocol selection is always explicit. `moqx` owns transport,
+The plugin supports MoQ Lite draft-05, standard MOQT draft-16 (including
+Moqtail's current CMSF workflow), and Cloudflare's deployed draft-14
+implementation over native QUIC. Protocol selection is always explicit. `moqx` owns transport,
 draft-specific wire/lifecycle state, typed events, subscriptions,
 publications, and object delivery; this project adapts those public values to
 Membrane elements and buffers.
@@ -43,7 +43,8 @@ appropriate CMAF/MP4 muxer or demuxer outside the core elements.
   tracks to its parent, and creates one internal `Source` only when the pipeline
   links the corresponding dynamic output pad. A pipeline may also request an
   unadvertised track by supplying its canonical stream format on that pad.
-- `Membrane.MOQX.Sink` advertises a namespace and a retained full catalog. Each
+- `Membrane.MOQX.Sink` advertises a namespace and, for catalog-bearing
+  protocols, a retained full catalog. Each
   requested input pad accepts one canonical `Membrane.MOQX.Track`. The Sink
   assigns MOQ coordinates and finishes the namespace publication when it
   terminates.
@@ -54,7 +55,8 @@ Authorization tokens remain explicit caller input and are passed to `moqx` as
 redacted `MOQX.Secret` values.
 
 The default catalog track follows the selected protocol: `catalog` for
-`:draft_16` and `.catalog` for `:cloudflare_draft_14`. Set
+`:draft_16` and `.catalog` for `:cloudflare_draft_14`. MoQ Lite exact-track
+operation publishes no catalog. Set
 `catalog_track_name` explicitly to override either convention. Endpoints and
 failed negotiation never select a protocol or catalog schema implicitly.
 
@@ -114,6 +116,60 @@ For draft-16 CMSF catalogs, decoded inline `initData` becomes
 `Membrane.MOQX.Track.initialization`; no initialization subscription is
 created. Cloudflare catalogs retain the separate `initTrack` subscription
 path.
+
+## MoQ Lite draft-05
+
+MoQ Lite is an explicit transport and publication protocol here; it is not a
+claim that the payload implements HANG. Exact known-track subscription is the
+supported contract. The plugin does not synthesize a CMSF or HANG catalog, and
+it does not create a separate initialization track.
+
+A Source receives the immutable track timescale from `TRACK_INFO`. Frame
+timestamps are converted to Membrane nanoseconds independently of group and
+object identifiers:
+
+```elixir
+child(:source, %Membrane.MOQX.Source{
+  endpoint: "moql://cdn.moq.dev:443",
+  protocol: :moq_lite_05,
+  track: %MOQX.TrackRef{namespace: ["my-service", "speech"], track: "opus"},
+  stream_format: %Membrane.MOQX.Track{packaging: "opus", initialization: nil}
+})
+```
+
+For publication, every Lite media pad requires a positive `timescale`.
+`publisher_priority`, `publisher_max_latency`, `retention`, and reliable
+`:subgroup` delivery are explicit pad policy. Membrane PTS is rounded to the
+nearest track tick, with exact halves rounded up. PTS must be non-negative and
+non-decreasing; equal PTS values and distinct values that quantize to the same
+tick are accepted.
+
+```elixir
+child(:producer, producer)
+|> via_in(Pad.ref(:input, :opus),
+  options: [
+    track_name: "opus",
+    timescale: 48_000,
+    publisher_priority: 127,
+    publisher_max_latency: 250,
+    retention: :live,
+    delivery: :subgroup
+  ]
+)
+|> child(:moqx_sink, %Membrane.MOQX.Sink{
+  endpoint: "moql://cdn.moq.dev:443",
+  protocol: :moq_lite_05,
+  namespace: ["my-service", "speech"],
+  inbound_subscriptions: :controlled,
+  track_demand_events: true
+})
+```
+
+In controlled mode, accept the typed request and then add the dynamic input
+pad whose `track_name` exactly equals `request.track.track`. The first accepted
+subscriber emits active `TrackDemand`; the final departure emits inactive
+`TrackDemand`. Reaching zero demand does not remove the pad, so later
+subscriptions reuse the same producer.
 
 ## Publishing CMAF
 
@@ -351,6 +407,30 @@ mix credo --strict
 
 Hermetic element tests should use `MOQX.Testing.Transport`. Live Cloudflare and
 Moqtail checks remain explicitly selected integration tests.
+
+### MoQ Lite native-QUIC validation
+
+`test/integration/moq_lite_05_test.exs` exercises two subscribers, first and
+final explicit departures, later resubscription, an abrupt final connection
+close, bounded leave notification, timestamps, and retained topology through
+the public Membrane and MOQX APIs.
+
+The local gate uses the Curley relay pinned by `moqx` v0.8.0 certification to
+commit `fd477082c43c3c0738fb62d077d85ea078f10045`. Start that release's
+`curley-moq-lite-05-relay` service on UDP 4463, then run:
+
+```bash
+MOQX_LITE_CA_FILE=/path/to/moqx/.tmp/integration-certs/ca.pem \
+  mix test --include integration test/integration/moq_lite_05_test.exs
+```
+
+The public gate is opt-in and uses a unique anonymous broadcast path:
+
+```bash
+MOQX_LITE_ENDPOINT=moql://cdn.moq.dev:443/anon \
+MOQX_LITE_CA_FILE=/etc/ssl/cert.pem \
+  mix test --include integration test/integration/moq_lite_05_test.exs
+```
 
 ### Live Cloudflare validation
 

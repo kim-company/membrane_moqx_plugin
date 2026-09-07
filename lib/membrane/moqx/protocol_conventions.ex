@@ -9,28 +9,61 @@ defmodule Membrane.MOQX.ProtocolConventions do
 
   alias Membrane.MOQX.Track
 
-  @type protocol :: :draft_16 | :cloudflare_draft_14 | module()
+  @type protocol :: :draft_16 | :cloudflare_draft_14 | :moq_lite_05 | module()
 
   @spec draft_16?(protocol()) :: boolean()
   def draft_16?(:draft_16), do: true
   def draft_16?(MOQX.Protocol.Draft16), do: true
   def draft_16?(_protocol), do: false
 
-  @spec catalog_track_name(protocol(), binary() | nil) :: binary()
+  @spec moq_lite_05?(protocol()) :: boolean()
+  def moq_lite_05?(:moq_lite_05), do: true
+  def moq_lite_05?(MOQX.Protocol.MOQLite05), do: true
+  def moq_lite_05?(_protocol), do: false
+
+  @spec catalog_track_name(protocol(), binary() | nil) :: binary() | nil
+  def catalog_track_name(protocol, _override)
+      when protocol in [:moq_lite_05, MOQX.Protocol.MOQLite05],
+      do: nil
+
   def catalog_track_name(_protocol, override) when is_binary(override), do: override
 
   def catalog_track_name(protocol, nil),
     do: if(draft_16?(protocol), do: "catalog", else: ".catalog")
 
-  @spec initialization_mode(protocol()) :: :inline | :separate_track
-  def initialization_mode(protocol),
-    do: if(draft_16?(protocol), do: :inline, else: :separate_track)
+  @spec initialization_mode(protocol()) :: :inline | :separate_track | :none
+  def initialization_mode(protocol) do
+    cond do
+      draft_16?(protocol) -> :inline
+      moq_lite_05?(protocol) -> :none
+      true -> :separate_track
+    end
+  end
 
   @spec track_options(protocol(), MOQX.PublishedTrack.retention(), MOQX.publication_delivery()) ::
           keyword()
   def track_options(protocol, retention, delivery) do
     options = [retention: retention]
     if draft_16?(protocol), do: options ++ [delivery: delivery], else: options
+  end
+
+  @spec track_options(
+          protocol(),
+          MOQX.PublishedTrack.retention(),
+          MOQX.publication_delivery(),
+          keyword()
+        ) :: keyword()
+  def track_options(protocol, retention, delivery, lite_options) do
+    if moq_lite_05?(protocol) do
+      [retention: retention, delivery: delivery] ++
+        Keyword.take(lite_options, [
+          :timescale,
+          :publisher_priority,
+          :publisher_max_latency
+        ])
+    else
+      track_options(protocol, retention, delivery)
+    end
   end
 
   @spec catalog_priority(protocol(), 0..255) :: 0..255
@@ -40,7 +73,11 @@ defmodule Membrane.MOQX.ProtocolConventions do
 
   def catalog_priority(_protocol, media_priority), do: media_priority
 
-  @spec catalog(protocol(), [binary()], [{binary(), binary() | nil, Track.t()}]) :: map()
+  @spec catalog(protocol(), [binary()], [{binary(), binary() | nil, Track.t()}]) :: map() | nil
+  def catalog(protocol, _namespace, _tracks)
+      when protocol in [:moq_lite_05, MOQX.Protocol.MOQLite05],
+      do: nil
+
   def catalog(protocol, namespace, tracks) do
     if draft_16?(protocol) do
       %{
