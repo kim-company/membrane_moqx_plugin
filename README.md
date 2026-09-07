@@ -18,6 +18,11 @@ Membrane elements and buffers.
 
 ## Status
 
+The public module documentation, starting with
+[`Membrane.MOQX`](lib/membrane/moqx.ex), defines capability and lifecycle
+boundaries alongside the code. This README provides recipes; the compatibility
+document records dated verification evidence, not a broader API guarantee.
+
 `Membrane.MOQX.Source` and `Membrane.MOQX.Sink` receive and publish the
 canonical `Membrane.MOQX.Track` format through the public `moqx` API. Explicit
 format adapters convert CMAF and custom Membrane formats at neighboring

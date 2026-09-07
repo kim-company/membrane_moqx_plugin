@@ -27,6 +27,21 @@ excluded**. That does not certify any public service or browser player.
 Likewise, QUIC handshake, MOQT setup, namespace/track readiness, receiver media
 delivery, completion, and advancing player playback are separate proof levels.
 
+### Lite coverage boundary
+
+The passing public Lite smoke uses a plugin Sink and direct MOQX subscribers;
+it does not exercise a plugin Source on the receiving side. Source timestamp
+and subgroup handling have hermetic coverage. A complete plugin Sink-to-relay-
+to-Source lifecycle regression and full Lite capability audit remain missing.
+These are tracked in [plugin #10](https://github.com/kim-company/membrane_moqx_plugin/issues/10).
+
+`CatalogSource` currently interprets the draft-14/16 CMSF profiles and rejects
+Lite. This is an implementation boundary, not a prohibition on catalogs in
+Lite: [HANG](https://doc.moq.dev/draft/moq-hang) defines application-level
+`catalog.json` media discovery. Neither interpreting that catalog nor HANG
+media/player interoperability is implemented. The module documentation is the
+source of truth for these API boundaries; this document records dated proof.
+
 ## Cloudflare draft-14: immediate completion can lose the final object
 
 Reproduction on the baseline:
@@ -127,6 +142,19 @@ not a conclusively localized MOQX-versus-relay defect. Cloudflare main at
 The deployed binary is unverified; pinned-relay/wire evidence is needed to
 attribute and repair the failure. No production code or acceptance test was
 changed, and no sleep-based workaround was added.
+
+Subsequent isolated transport tracing reproduced missing payload before the
+subscriber's protocol decoder: in one failure the publisher submitted the
+payload stream and an empty terminal stream, but the subscriber saw only the
+terminal stream and completion. A direct MOQX-only check without Membrane or
+the empty terminal object also failed (four runs: two delivered, one completed
+without payload, one timed out). The plugin is therefore not necessary to
+reproduce this failure; removing its terminal object is not a demonstrated fix.
+These temporary diagnostic harnesses are not committed regression coverage.
+The deployed relay revision remains unknown. Draft-16 completion can precede
+data, and its [completion rules](https://www.ietf.org/archive/id/draft-ietf-moq-transport-16.html#section-9.15)
+allow early state disposal at the cost of late objects, so this evidence is a
+delivery limitation, not by itself proof of a protocol violation.
 
 Credential-safe execution used non-echoing stdin, in-memory URL construction,
 disabled logging in the isolated diagnostic VM, caught failures and fixed

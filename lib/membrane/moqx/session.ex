@@ -5,6 +5,11 @@ defmodule Membrane.MOQX.Session do
   A catalog controller and its one-track Sources can share this process without
   sharing their Membrane mailboxes. Each subscription is monitored and is
   automatically cancelled if its owner exits.
+
+  This process shares connection lifetime and event routing, not catalog or
+  broadcast discovery. Its protocol is fixed at startup; Sources sharing it
+  must select the same resolved protocol. It does not automatically retry a
+  different draft when a relay rejects the selected one.
   """
 
   use GenServer

@@ -27,7 +27,9 @@ defmodule Membrane.MOQX.Sink do
   discovery. Cloudflare draft-14 preserves `.catalog`, separate initialization
   tracks, and subgroup-only publication. Protocol selection is always explicit.
 
-  MoQ Lite draft-05 is exact-track and catalog-free. Each Lite input pad must
+  MoQ Lite draft-05 publication here uses exact tracks without an automatically
+  generated catalog. This is a plugin convention, not a ban on Lite catalogs.
+  Each Lite input pad must
   provide a positive `timescale`; it may also set track-specific
   `publisher_priority`, `publisher_max_latency`, retention, and reliable
   subgroup delivery. PTS is rounded to the nearest track tick (exact halves
@@ -47,6 +49,13 @@ defmodule Membrane.MOQX.Sink do
 
   MoQ Lite does not imply HANG payload or catalog compatibility; media framing
   remains an application concern outside this Sink.
+
+  Input EOS finishes the track through MOQX; it does not wait for an application
+  acknowledgement that every subscriber received the final buffer. Observed
+  Cloudflare draft-14/16 immediate-EOS loss remains a compatibility limitation
+  (see `Membrane.MOQX`). Do not treat successful local publication or subscriber
+  readiness as delivery certification. This element does not add a delivery
+  grace delay, encode/mux payloads, or pace them by PTS.
   """
 
   use Membrane.Sink
