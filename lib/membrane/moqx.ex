@@ -75,5 +75,8 @@ defmodule Membrane.MOQX do
 
   Keep authorization secrets and token-bearing endpoint URLs out of logs and
   diagnostics. `MOQX.Secret` does not redact a token embedded in a URI.
+  `DiagnosticsTest` verifies wrapped-authorization redaction during a real
+  Sink connection failure; this is not a blanket guarantee for arbitrary
+  caller-supplied URLs or peer error text.
   """
 end

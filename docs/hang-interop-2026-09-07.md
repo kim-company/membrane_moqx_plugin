@@ -39,6 +39,12 @@ polling is fixture scheduling, not an EOS gate. Zero-byte backend data events
 carry no protocol bytes and are ignored; their separate FIN remains forwarded.
 It is not a cache/cluster implementation or a replacement for native relay tests.
 
+`DiagnosticsTest` exercises real Sink setup failure in an isolated network
+with a synthetic authorization value. Captured pipeline/error diagnostics
+contain `#MOQX.Secret<REDACTED>` and the connection error, not the synthetic
+credential. This covers explicit wrapped authorization, not token-bearing URLs
+or arbitrary peer-supplied error text. No real credentials are used by the test.
+
 `test/integration/lite_roundtrip_test.exs` passed both tests against the local
 pinned relay and the public relay:
 
