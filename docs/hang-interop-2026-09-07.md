@@ -21,6 +21,24 @@ baseline only for the combinations explicitly exercised below.
 
 ## Verified pipeline behavior
 
+`test/membrane/moqx/lite_roundtrip_test.exs` provides hermetic full-pipeline
+coverage through `MOQX.Testing.Transport`, not fabricated receiver events:
+
+- Raw Sink → semantic relay → Source: exact payload, PTS, group/object
+  coordinates and boundaries across two groups, with final media before EOS.
+- HANG Sink → semantic relay → CatalogSource → selected Source → Legacy:
+  exact Opus packet/PTS, final media before EOS and catalog offer withdrawal.
+- Two Sources sharing a Session: both receive media, abrupt first-owner death
+  leaves the second receiving, final-owner death returns aggregate demand to
+  zero, and a new Source can subscribe and receive new media on that Session.
+
+The scoped relay translates subscription IDs and forwards actual requests,
+responses, group streams, subscription updates and FIN/RESET. It does not
+generate media or add a delivery-acknowledgement delay. Passive stream-accept
+polling is fixture scheduling, not an EOS gate. Zero-byte backend data events
+carry no protocol bytes and are ignored; their separate FIN remains forwarded.
+It is not a cache/cluster implementation or a replacement for native relay tests.
+
 `test/integration/lite_roundtrip_test.exs` passed both tests against the local
 pinned relay and the public relay:
 
@@ -112,15 +130,21 @@ these runs certify media before shutdown, not reference-side graceful EOS.
   verified above.
 - Discovery initial snapshot, live add/remove/reappearance, foreign-owner
   cancellation rejection, owner-exit cancellation, and surviving-owner updates
-  have public Session/transport regression coverage. Discontinuity, repeated
-  full media lifecycle and multiple-subscriber certification remain in progress.
+  have public Session/transport regression coverage. Shared-Source failure,
+  demand and resubscription now have full hermetic coverage above; native
+  multiple-subscriber certification and discontinuities remain incomplete.
 - The pinned relay requests TrackInfo before controlled admission. MOQX 0.9.0
   rejects TrackInfo for absent tracks, so on-demand creation solely in response
   to admission is not certified; register the track first.
   The complete upstream metadata/provisioning dependency is tracked in
   [MOQX #47](https://github.com/dmorn/moqx/issues/47).
-- One draft-16 datagram fixture timed out in the full suite. Its isolated rerun
-  and same-seed full rerun passed; this is not evidence that the flake is fixed.
+- Full-suite stress exposed a draft-16 fixture discarding an early datagram
+  while waiting for catalog bytes, and a CMAF fixture subscribing after its
+  producer had already emitted EOS. The fixtures now retain early datagrams
+  and establish subscriber admission before starting the finite CMAF producer.
+  Both focused tests passed eleven consecutive runs afterward; the complete
+  suite passed 89 tests with seven opt-in integrations excluded (seed 233865).
+  The three new hermetic scenarios also passed eleven consecutive runs.
 - Empty-group codec-epoch discontinuities are unsupported: Source emits no
   discontinuity event and MOQX 0.9.0 has no empty-group publication operation.
   A timestamped empty-payload MediaEnd frame is a different concept and is

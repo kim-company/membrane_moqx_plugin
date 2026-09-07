@@ -1743,10 +1743,7 @@ defmodule Membrane.MOQX.SinkTest do
     ]
 
     spec =
-      child(:source, %Testing.Source{
-        output: Testing.Source.output_from_buffers(buffers),
-        stream_format: stream_format
-      })
+      child(:source, %TestControlledSource{stream_format: stream_format})
       |> child(:adapter, %ToTrack{adapter: Membrane.MOQX.TrackAdapter.CMAF})
       |> via_out(Pad.ref(:output, :video))
       |> via_in(Pad.ref(:input, :video),
@@ -1768,7 +1765,11 @@ defmodule Membrane.MOQX.SinkTest do
       {:track_ready, Pad.ref(:input, :video), "video.m4s"}
     )
 
-    assert {:ok, objects} = TestRelay.capture_many(relay, "video.m4s", 4)
+    capture = Task.async(fn -> TestRelay.capture_many(relay, "video.m4s", 4) end)
+    assert_pipeline_notified(pipeline, :sink, {:subscriber_joined, "video.m4s", _, 1})
+    Testing.Pipeline.notify_child(pipeline, :source, {:publish, buffers})
+    Testing.Pipeline.notify_child(pipeline, :source, :end_of_stream)
+    assert {:ok, objects} = Task.await(capture)
 
     assert Enum.map(objects, &{&1.group_id, &1.object_id, &1.status, &1.payload}) == [
              {0, 0, nil, "chunk-1"},

@@ -52,8 +52,8 @@ defmodule Membrane.MOQX do
   | Empty/late HANG catalog publication | Sink; SinkTest and native HANG roundtrip | Implemented, tested |
   | Legacy Opus/H.264 framing, PTS, keyframe flags and MediaEnd | Hang.Legacy; HangLegacyTest; local/public reference-player decoding | Implemented; reverse legacy reference proof pending |
   | H.264/AAC CMAF metadata and chunks | Hang.CMAF; HangCMAFTest and SinkTest; both reference directions local/public | Implemented, verified for pinned stack |
-  | Multi-subscriber demand, rejection and teardown | SinkTest exercises individual transport peers | Full Lite Source/Sink lifecycle matrix pending |
-  | Hermetic full Sink-to-Source semantic relay | Native roundtrips exist; element fixtures are separate | Not yet implemented |
+  | Multi-subscriber demand and owner teardown | LiteRoundtripTest: shared Sources, abrupt departure, survivor media, zero demand and resubscription; SinkTest: controlled decisions | Hermetic paths tested; native multi-subscriber matrix pending |
+  | Hermetic full Sink-to-Source semantic relay | LiteRoundtripTest: raw groups/PTS/immediate EOS and HANG catalog selection/media/offer withdrawal | Implemented, tested |
   | Absent-track provisioning through pinned relay | Register metadata before controlled admission; MOQX #47 | Upstream-blocked |
   | Empty-group HANG codec-epoch discontinuity | No publication operation or Source event; MOQX #48 | Upstream-blocked, unsupported |
   | LOC, other codecs and universal browser playback | Opaque transport/recognized catalog metadata is not decoder support | Unsupported by supplied adapters |
