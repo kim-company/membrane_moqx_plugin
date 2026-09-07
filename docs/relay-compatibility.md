@@ -11,7 +11,7 @@ are a dated observation, not a continuing availability guarantee.
 | --- | --- | --- | --- |
 | MoQ Lite 05 / `moql://cdn.moq.dev:443/anon` | `:moq_lite_05` | Public native-QUIC smoke passed, including demand changes, resubscription, timestamps and abrupt final departure | Exact-track operation; no synthesized catalog or claim of HANG media compatibility |
 | Cloudflare draft-14 / `moqt://draft-14.cloudflare.mediaoverquic.com:443` | `:cloudflare_draft_14` | Media can flow, but immediate final-buffer/EOS failed | Retained with a known completion limitation; no new draft-14-specific workaround planned absent a concrete consumer requirement |
-| Cloudflare draft-16 / `moqt://draft-16.cloudflare.mediaoverquic.com:443` | `:draft_16` | TLS-verified QUIC/ALPN passed; unauthenticated sessions closed during or just after setup | Authenticated publication, media and EOS remain unverified; do not treat connection success as certification |
+| Cloudflare draft-16 / `moqt://draft-16.cloudflare.mediaoverquic.com:443` | `:draft_16` | Authenticated controlled Sink-to-Source publication works, but immediate EOS lost the payload in 3 of 5 runs | Not completion-certified; upgrading from draft-14 does not by itself solve the observed failure |
 | Current public Moqtail / `relay.moqtail.dev:443` | No draft-18 implementation in MOQX 0.8.1 | `moqt-16` rejected; TLS-verified `moqt-18` QUIC connection succeeded | Use a pinned draft-16 relay for existing workflows; public interoperability needs draft-18 implementation and delivery proof |
 | Cloudflare draft-18 interop offering | No draft-18 implementation in MOQX 0.8.1 | Provider-documented test offering; not exercised by this plugin | Not a globally deployed or plugin-certified target |
 
@@ -63,7 +63,7 @@ Protocol ordering, credential handling and any client mitigation belong in
 MOQX; element lifecycle and buffer adaptation belong in this plugin. Do not
 hide a relay/protocol completion defect with sleeps in Membrane callbacks.
 
-## Cloudflare draft-16: prerequisite and current check result
+## Cloudflare draft-16: authentication works, immediate EOS is intermittent
 
 The credential-free transport probe was:
 
@@ -96,17 +96,56 @@ path. MOQX's draft-16 codec takes its native-QUIC `CLIENT_SETUP` path from the
 endpoint URI. The existing draft-14 `MOQX_AUTHORIZATION_FILE` test helper must
 not be advertised as a verified substitute for this session-path contract.
 
-The authenticated data/EOS check is **blocked pending provisioned relay
-credentials and validation of the secret-safe native-QUIC configuration**.
-No infrastructure was provisioned and no real credentials were used. Supply
-secret-file or secret-manager references rather than token values in chat,
-shell arguments, environment values, source or tracker comments. Before using
-real tokens, verify URI-path redaction in logs, exceptions and assertions with
-synthetic secrets. Cloudflare also warns that token-bearing paths may appear
-in server access logs.
+An operator subsequently supplied a publish/subscribe credential. Using it in
+the connection path established native-QUIC setup and `PublicationReady`.
+Both Membrane clients used that scoped credential in an isolated diagnostic
+process. No new relay infrastructure was provisioned.
+
+The check adapted the existing controlled Source/Sink integration workflow to
+explicit `:draft_16`, with certificate verification and unique namespaces:
+
+1. Publish the namespace, subscribe to an absent track, accept the typed request,
+   and attach a controlled producer to the Sink.
+2. Observe namespace readiness, track readiness, subscription readiness and a
+   real subscriber join.
+3. Submit one literal payload buffer and EOS back-to-back, without waiting for
+   receiver delivery. Observe the Source's output in message order; EOS without
+   the exact payload is a failure even when completion counters agree.
+
+Across **five authenticated immediate-EOS runs**, two delivered the exact final
+payload before EOS and three emitted EOS without it. Failed runs reported
+expected/processed stream counts of **1/1, 0/0, 0/0**; successful runs reported
+**1/1 and 2/2**. These are a small diagnostic sample, not a failure-rate estimate.
+Four comparison runs that waited for payload receipt before submitting EOS all
+passed. That comparison demonstrates ordinary delivery and narrows the failure
+to termination ordering; it does **not** satisfy the immediate-EOS gate.
+
+This establishes a draft-16 failure in the authenticated end-to-end workflow,
+not a conclusively localized MOQX-versus-relay defect. Cloudflare main at
+`ab1cfffaf988d11c624d1b73b7e6c72e004aed04`
+[also removes subscriptions on incoming completion without draining the count](https://github.com/cloudflare/moq-rs/blob/ab1cfffaf988d11c624d1b73b7e6c72e004aed04/moq-transport/src/session/subscriber.rs#L909-L935).
+The deployed binary is unverified; pinned-relay/wire evidence is needed to
+attribute and repair the failure. No production code or acceptance test was
+changed, and no sleep-based workaround was added.
+
+Credential-safe execution used non-echoing stdin, in-memory URL construction,
+disabled logging in the isolated diagnostic VM, caught failures and fixed
+allowlisted output. Synthetic invalid-credential runs checked those failure
+diagnostics first. The token was not saved to a file, supplied as a process
+argument/environment value, or included in published evidence. This is **not**
+a general redaction certification for MOQX, Membrane or application logging.
+The one-off harness is not a committed automated regression; a reusable safe
+integration workflow remains part of the upstream certification.
+
+For future runs, prefer secret-file or secret-manager references over token
+values in chat. Never put token-bearing URLs in shell arguments, environment
+values, source, ordinary diagnostics or tracker comments. Validate redaction
+with synthetic secrets before enabling normal logs; Cloudflare also warns that
+token-bearing paths may appear in server access logs.
 
 [MOQX #42](https://github.com/dmorn/moqx/issues/42) owns that complete upstream
-certification. The acceptance run must show exact receiver payloads followed
+certification; missing credentials are no longer the blocker for this check.
+The acceptance run must show exact receiver payloads followed
 by EOS when the final buffer and finish are submitted immediately, with no
 receipt acknowledgement or arbitrary sleep before finish. It must also cover
 withdrawal, departure and reuse; retain the endpoint/version/date and sanitized

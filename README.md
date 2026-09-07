@@ -7,8 +7,8 @@ The plugin implements MoQ Lite draft-05, standard MOQT draft-16, and
 Cloudflare draft-14 over native QUIC. Implemented protocol support does not
 imply compatibility with every current public relay. See the dated
 [relay compatibility and retirement policy](docs/relay-compatibility.md):
-Cloudflare draft-14 has a known immediate-EOS delivery limitation, authenticated
-Cloudflare draft-16 verification is pending, and the current public Moqtail
+Cloudflare draft-14 and authenticated draft-16 controlled publication have
+observed immediate-EOS delivery failures, and the current public Moqtail
 relay requires draft-18, which MOQX 0.8.1 does not implement.
 
 Protocol selection is always explicit. `moqx` owns transport,
@@ -468,7 +468,9 @@ Both tests default to Cloudflare's public draft-14 relay. Override
 `MOQX_AUTHORIZATION_FILE` loads a token into `MOQX.Secret` for that existing
 draft-14 authorization path. It is not a verified Cloudflare draft-16 session
 authentication recipe. Cloudflare documents draft-16 tokens in the connection
-URL path; authenticated verification and secret-safe configuration are tracked
+URL path; the authenticated controlled-publication check reproduced intermittent
+final-payload loss on immediate EOS. Completion certification and reusable
+secret-safe configuration are tracked
 in [MOQX #42](https://github.com/dmorn/moqx/issues/42).
 
 ### Live Moqtail draft-16 validation
