@@ -51,6 +51,20 @@ defmodule Membrane.MOQX.Integration.LiteRoundtripTest do
 
     assert_pipeline_notified(publisher, :sink, {:track_ready, _, "opus"}, @timeout)
 
+    # Publisher-local readiness does not prove that a distributed relay has
+    # exposed the broadcast. Observe discovery instead of adding a grace sleep.
+    discovery_session =
+      start_supervised!(
+        {Session, endpoint: endpoint, protocol: :moq_lite_05, connect_options: connection}
+      )
+
+    {:ok, discovery} = Session.discover(discovery_session, "")
+    path = Enum.join(namespace, "/")
+
+    assert_receive {:moqx_session, ^discovery_session,
+                    %MOQX.Event.BroadcastAvailable{discovery: ^discovery, path: ^path}},
+                   @timeout
+
     subscriber =
       Testing.Pipeline.start_link_supervised!(
         spec:

@@ -34,6 +34,14 @@ The second path selects an offer instead of auto-linking every rendition.
 Neither test delays EOS or waits for receiver delivery before publishing EOS.
 They do not certify absent-track provisioning or every multi-subscriber case.
 
+A later committed-revision rerun passed locally but the public HANG catalog
+subscription reset before discovery (code `91141958510842`); raw Lite passed.
+The HANG harness had treated publisher-local track readiness as remote broadcast
+visibility. It now observes `BroadcastAvailable` before starting CatalogSource,
+as the raw test already did. The same-seed rerun and four subsequent public
+runs passed both tests. This is an observable discovery barrier, not a sleep,
+retry loop, or proof that every distributed-relay failure is resolved.
+
 ## Actual reference-player decoding
 
 The runnable harness in `scripts/interop/` publishes encoded H.264 and Opus
@@ -118,5 +126,6 @@ these runs certify media before shutdown, not reference-side graceful EOS.
   A timestamped empty-payload MediaEnd frame is a different concept and is
   covered separately. The complete upstream lifecycle/API dependency is
   [MOQX #48](https://github.com/dmorn/moqx/issues/48).
-- Implementation PR and adversarial review are pending. These observations do
-  not close #10 or #11 and do not claim universal HANG/codec/browser support.
+- Draft implementation [PR #12](https://github.com/kim-company/membrane_moqx_plugin/pull/12)
+  is open; adversarial review is in progress. These observations do not close
+  #10 or #11 and do not claim universal HANG/codec/browser support.
