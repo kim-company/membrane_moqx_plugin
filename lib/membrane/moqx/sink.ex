@@ -17,6 +17,13 @@ defmodule Membrane.MOQX.Sink do
   `Membrane.MOQX.Hang.CMAF` with `TrackAdapter.ToTrack` for H.264/AAC CMAF.
   These are explicit adapters; this Sink does not encode media or add framing.
 
+  With `:none`, canonical initialization remains caller-owned metadata; no
+  catalog or initialization track is synthesized. Current CMSF publication
+  verification covers Cloudflare CMSF on draft-14 and Moqtail CMSF on draft-16.
+  Although MOQX accepts other CMSF/transport compositions, this Sink's
+  initialization lifecycle has not yet been made profile-owned throughout:
+  do not use those cross-compositions for initialized media (PR #12 review).
+
   With `inbound_subscriptions: :controlled`, typed MOQX requests are surfaced
   as `{:subscription_requested, request}` parent notifications. The parent
   explicitly accepts or rejects them through child notifications. Approval may
@@ -489,6 +496,10 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp prepare_initialization(_state, _name, %{initialization: nil}) do
+    {:ok, nil, nil}
+  end
+
+  defp prepare_initialization(%{profile: :none}, _name, _track) do
     {:ok, nil, nil}
   end
 

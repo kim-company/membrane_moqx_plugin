@@ -127,5 +127,8 @@ these runs certify media before shutdown, not reference-side graceful EOS.
   covered separately. The complete upstream lifecycle/API dependency is
   [MOQX #48](https://github.com/dmorn/moqx/issues/48).
 - Draft implementation [PR #12](https://github.com/kim-company/membrane_moqx_plugin/pull/12)
-  is open; adversarial review is in progress. These observations do not close
+  is open. Its adversarial review found a raw Cloudflare initialization crash
+  and a broader transport/profile initialization mismatch. The raw-mode crash
+  has a public-pipeline regression and minimal fix; the cross-profile lifecycle
+  design remains open in the review discussion. These observations do not close
   #10 or #11 and do not claim universal HANG/codec/browser support.

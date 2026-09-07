@@ -49,6 +49,64 @@ defmodule Membrane.MOQX.SinkTest do
 
   require Pad
 
+  test "raw Cloudflare publication accepts canonical initialization without creating an init track" do
+    namespace = ["live", "raw-initialization"]
+    relay = TestRelay.start(namespace)
+
+    format = %Membrane.MOQX.Track{
+      packaging: "cmaf",
+      initialization: "caller-owned-init",
+      selection_params: %{"codec" => "avc1.42001e"}
+    }
+
+    spec =
+      child(:source, %TestControlledSource{stream_format: format})
+      |> via_in(Pad.ref(:input, :video), options: [track_name: "video", retention: :latest])
+      |> child(:sink, %Sink{
+        endpoint: relay.endpoint,
+        protocol: :cloudflare_draft_14,
+        namespace: namespace,
+        transport: TestRelay.transport(relay),
+        inbound_subscriptions: :controlled,
+        infrastructure_subscriptions: :reject
+      })
+
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+    assert_pipeline_notified(pipeline, :sink, {:track_ready, Pad.ref(:input, :video), "video"})
+
+    # Neither conventional infrastructure name is synthesized by raw mode.
+    for name <- ["video.init", ".catalog"] do
+      subscriber = Task.async(fn -> TestRelay.subscribe(relay, name) end)
+      assert_pipeline_notified(pipeline, :sink, {:subscription_requested, request})
+      assert request.track.track == name
+
+      Testing.Pipeline.notify_child(
+        pipeline,
+        :sink,
+        {:reject_subscription, request, %MOQX.SubscriptionRejection{code: :track_does_not_exist}}
+      )
+
+      assert {:error, _rejection} = Task.await(subscriber)
+    end
+
+    capture = Task.async(fn -> TestRelay.capture(relay, ["video"]) end)
+    assert_pipeline_notified(pipeline, :sink, {:subscription_requested, request})
+    Testing.Pipeline.notify_child(pipeline, :sink, {:accept_subscription, request})
+    assert_pipeline_notified(pipeline, :sink, {:subscriber_joined, "video", _, 1})
+
+    buffer = %Buffer{
+      payload: "raw-media",
+      metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+    }
+
+    Testing.Pipeline.notify_child(pipeline, :source, {:publish, [buffer]})
+    assert {:ok, objects} = Task.await(capture)
+    assert objects["video"].payload == "raw-media"
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
+
   test "publishes a HANG CMAF video catalog through the explicit CMAF adapter" do
     namespace = ["room", "cmaf.hang"]
 
