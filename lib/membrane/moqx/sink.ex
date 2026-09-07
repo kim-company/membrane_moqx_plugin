@@ -35,7 +35,9 @@ defmodule Membrane.MOQX.Sink do
   register the track first; controlled admission still applies afterward.
 
   Subscriber join/leave notifications include the track's current subscriber
-  count. Optional `Membrane.MOQX.Event.TrackDemand` events carry only aggregate
+  count on this MOQX connection, not the viewer count behind a relay. A relay
+  may aggregate multiple downstream Sources into a single upstream subscription.
+  Optional `Membrane.MOQX.Event.TrackDemand` events carry only aggregate
   zero/nonzero demand transitions upstream on an established media pad. Pad
   removal terminates that event edge and does not synthesize a final inactive
   event on the detached pad; the parent still observes subscriber departure.

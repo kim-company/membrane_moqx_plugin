@@ -58,6 +58,19 @@ The second path selects an offer instead of auto-linking every rendition.
 Neither test delays EOS or waits for receiver delivery before publishing EOS.
 They do not certify absent-track provisioning or every multi-subscriber case.
 
+`test/integration/lite_multi_source_test.exs` additionally passed on both the
+pinned local relay (seed 58877, 0.3 seconds) and public relay (seed 63983,
+1.1 seconds). Two real plugin Sources share one Session and both receive exact
+media/PTS; killing the first Source leaves the second receiving. Killing the
+last Source returns upstream demand to zero. A third Source subscribes on the
+same Session with an explicit group-start filter and receives new media before
+immediate EOS, with exact group/object coordinates.
+
+The reference relay combines downstream subscriptions into one upstream
+subscription. Sink subscriber counts therefore describe its MOQX connection,
+not downstream viewer counts. These native tests observe broadcast discovery
+before subscribing and add no EOS delay or receiver-delivery acknowledgement.
+
 A later committed-revision rerun passed locally but the public HANG catalog
 subscription reset before discovery (code `91141958510842`); raw Lite passed.
 The HANG harness had treated publisher-local track readiness as remote broadcast
@@ -137,8 +150,9 @@ these runs certify media before shutdown, not reference-side graceful EOS.
 - Discovery initial snapshot, live add/remove/reappearance, foreign-owner
   cancellation rejection, owner-exit cancellation, and surviving-owner updates
   have public Session/transport regression coverage. Shared-Source failure,
-  demand and resubscription now have full hermetic coverage above; native
-  multiple-subscriber certification and discontinuities remain incomplete.
+  demand and resubscription have hermetic and native local/public coverage
+  above. Absent-track controlled admission and discontinuities remain blocked
+  as described below; this does not certify every catalog failure/reuse path.
 - The pinned relay requests TrackInfo before controlled admission. MOQX 0.9.0
   rejects TrackInfo for absent tracks, so on-demand creation solely in response
   to admission is not certified; register the track first.
