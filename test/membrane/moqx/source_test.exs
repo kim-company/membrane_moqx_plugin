@@ -317,7 +317,7 @@ defmodule Membrane.MOQX.SourceTest do
       )
 
     catalog_ref = %MOQX.TrackRef{namespace: namespace, track: "catalog"}
-    assert {:ok, _subscription} = Session.subscribe(session, catalog_ref, catalog?: true)
+    assert {:ok, _subscription} = Session.subscribe(session, catalog_ref, profile: :moqtail_cmsf)
     assert_receive {:moqx_session, ^session, %MOQX.Event.CatalogReceived{}}
 
     spec =

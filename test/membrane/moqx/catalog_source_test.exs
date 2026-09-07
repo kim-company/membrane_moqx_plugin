@@ -19,16 +19,190 @@ defmodule Membrane.MOQX.CatalogSourceTest do
 
   require Pad
 
-  test "rejects catalog-free MoQ Lite at the option boundary" do
+  test "invalidates an old offer when its replacement codec is unsupported" do
+    alias Membrane.MOQX.TestLite05Publisher
+    namespace = ["room", "codec-change.hang"]
+    ref = %MOQX.TrackRef{namespace: namespace, track: "catalog.json"}
+
+    initial =
+      ~s({"audio":{"renditions":{"audio":{"codec":"opus","sampleRate":48000,"numberOfChannels":2}}}})
+
+    replacement =
+      ~s({"audio":{"renditions":{"audio":{"codec":"unknown-codec","sampleRate":48000,"numberOfChannels":2}}}})
+
+    publisher = TestLite05Publisher.start(ref, 1_000_000, [[{0, initial}], [{0, replacement}]])
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:catalog, %CatalogSource{
+            endpoint: publisher.endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: TestLite05Publisher.transport(publisher)
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :catalog, {:track_available, %TrackOffer{} = offer})
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:track_ignored, "audio", {:unsupported_media, :unknown_codec}}
+    )
+
+    assert_pipeline_notified(pipeline, :catalog, {:track_unavailable, ^offer})
+    TestLite05Publisher.finish_group(publisher)
+    TestLite05Publisher.finish_subscription(publisher)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Publisher.await_shutdown(publisher)
+  end
+
+  test "withdraws the actual cross-broadcast HANG CMAF offer when its rendition disappears" do
+    alias Membrane.MOQX.TestLite05Publisher
+    namespace = ["room", "catalog.hang"]
+    ref = %MOQX.TrackRef{namespace: namespace, track: "catalog.json"}
+
+    payload =
+      ~s({"video":{"renditions":{"video":{"broadcast":"other/media.hang","codec":"avc1.640028","codedWidth":1920,"codedHeight":1080,"container":{"kind":"cmaf","init":"aW5pdA=="}}}}})
+
+    publisher = TestLite05Publisher.start(ref, 1_000_000, [[{0, payload}], [{0, "{}"}]])
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:catalog, %CatalogSource{
+            endpoint: publisher.endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: TestLite05Publisher.transport(publisher)
+          })
+      )
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:track_available,
+       %TrackOffer{
+         track_ref: %MOQX.TrackRef{namespace: ["room", "other", "media.hang"], track: "video"},
+         stream_format: %Track{packaging: "cmaf", initialization: "init"}
+       } = offer}
+    )
+
+    assert_pipeline_notified(pipeline, :catalog, {:track_unavailable, ^offer})
+    TestLite05Publisher.finish_group(publisher)
+    TestLite05Publisher.finish_subscription(publisher)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Publisher.await_shutdown(publisher)
+  end
+
+  test "reports a malformed HANG catalog without terminating its pipeline" do
+    alias Membrane.MOQX.TestLite05Publisher
+    namespace = ["room", "invalid.hang"]
+    ref = %MOQX.TrackRef{namespace: namespace, track: "catalog.json"}
+    publisher = TestLite05Publisher.start(ref, 1_000_000, [{0, "invalid JSON"}])
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:catalog, %CatalogSource{
+            endpoint: publisher.endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: TestLite05Publisher.transport(publisher)
+          })
+      )
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:catalog_failed, %MOQX.Catalog.Error{reason: :invalid_json}}
+    )
+
+    assert Process.alive?(pipeline)
+    TestLite05Publisher.finish_group(publisher)
+    TestLite05Publisher.finish_subscription(publisher)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Publisher.await_shutdown(publisher)
+  end
+
+  test "offers HANG Opus media from an explicitly selected Lite catalog profile" do
+    alias Membrane.MOQX.TestLite05Publisher
+
+    namespace = ["room", "speaker.hang"]
+    catalog_ref = %MOQX.TrackRef{namespace: namespace, track: "catalog.json"}
+
+    payload =
+      ~s({"audio":{"renditions":{"opus":{"codec":"opus","sampleRate":48000,"numberOfChannels":2}}}})
+
+    publisher = TestLite05Publisher.start(catalog_ref, 1_000_000, [{0, payload}])
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:catalog, %CatalogSource{
+            endpoint: publisher.endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: TestLite05Publisher.transport(publisher)
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :catalog, :catalog_ready)
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:track_available,
+       %TrackOffer{
+         track_ref: %MOQX.TrackRef{namespace: ^namespace, track: "opus"},
+         stream_format: %Track{
+           packaging: "hang/legacy",
+           initialization: nil,
+           selection_params: %{"codec" => "opus", "sampleRate" => 48_000, "numberOfChannels" => 2}
+         }
+       }}
+    )
+
+    TestLite05Publisher.finish_group(publisher)
+    TestLite05Publisher.finish_subscription(publisher)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Publisher.await_shutdown(publisher)
+  end
+
+  test "requires an explicit catalog profile independently of the protocol" do
     options = %CatalogSource{
       endpoint: "moql://localhost:443",
       protocol: :moq_lite_05,
       namespace: ["live"]
     }
 
-    assert_raise ArgumentError, ~r/CatalogSource does not support catalog-free protocol/, fn ->
-      CatalogSource.handle_init(nil, options)
-    end
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {%Membrane.ParentError{message: message}, _stack}} =
+             Testing.Pipeline.start_link(spec: child(:catalog, options))
+
+    assert message =~ "CatalogSource requires a catalog profile"
   end
 
   test "uses the draft-16 catalog convention and preserves inline initialization" do
@@ -65,6 +239,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
           child(:source, %CatalogSource{
             endpoint: publisher.endpoint,
             protocol: :draft_16,
+            profile: :moqtail_cmsf,
             namespace: namespace,
             transport: TestDraft16Publisher.transport(publisher)
           })
@@ -153,6 +328,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
           child(:source, %CatalogSource{
             endpoint: publisher.endpoint,
             protocol: :draft_16,
+            profile: :moqtail_cmsf,
             namespace: namespace,
             transport: TestDraft16Publisher.transport(publisher)
           })
@@ -225,6 +401,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
       child(:source, %CatalogSource{
         endpoint: publisher.endpoint,
         protocol: :cloudflare_draft_14,
+        profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestPublisher.transport(publisher)
       })
@@ -305,6 +482,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
       child(:source, %CatalogSource{
         endpoint: publisher.endpoint,
         protocol: :cloudflare_draft_14,
+        profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestPublisher.transport(publisher)
       })
@@ -364,6 +542,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
           child(:source, %CatalogSource{
             endpoint: publisher.endpoint,
             protocol: :cloudflare_draft_14,
+            profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestPublisher.transport(publisher)
           })

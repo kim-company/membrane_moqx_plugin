@@ -6,8 +6,12 @@ defmodule Membrane.MOQX.Session do
   sharing their Membrane mailboxes. Each subscription is monitored and is
   automatically cancelled if its owner exits.
 
-  This process shares connection lifetime and event routing, not catalog or
-  broadcast discovery. Its protocol is fixed at startup; Sources sharing it
+  This process shares connection lifetime and routes subscriptions and broadcast
+  discoveries to their individual callers. Catalog profiles are passed per
+  subscription to MOQX; they are not connection-global. Discovery reports
+  paths, never automatically subscribes to catalogs or creates media Sources.
+  Subscription/discovery owner exit cancels only that owner's handles.
+  Its protocol is fixed at startup; Sources sharing it
   must select the same resolved protocol. It does not automatically retry a
   different draft when a relay rejects the selected one.
   """
@@ -35,6 +39,16 @@ defmodule Membrane.MOQX.Session do
   def unsubscribe(session, subscription) do
     GenServer.call(session, {:unsubscribe, subscription})
   end
+
+  @doc "Discovers broadcast paths, routing MOQX discovery events to the caller."
+  @spec discover(pid(), binary(), keyword()) :: {:ok, MOQX.Discovery.t()} | {:error, term()}
+  def discover(session, prefix, options \\ []),
+    do: GenServer.call(session, {:discover, prefix, options})
+
+  @doc "Cancels a discovery owned by the caller; withdrawal and completion remain observable."
+  @spec cancel_discovery(pid(), MOQX.Discovery.t()) :: :ok | {:error, term()}
+  def cancel_discovery(session, discovery),
+    do: GenServer.call(session, {:cancel_discovery, discovery})
 
   @doc "Returns the explicit protocol selection owned by the session."
   @spec protocol(pid()) :: atom() | module()
@@ -65,6 +79,7 @@ defmodule Membrane.MOQX.Session do
            client: client,
            protocol: protocol,
            subscriptions: %{},
+           discoveries: %{},
            monitors: %{},
            closed?: false
          }}
@@ -77,14 +92,39 @@ defmodule Membrane.MOQX.Session do
   @impl true
   def handle_call(:protocol, _from, state), do: {:reply, state.protocol, state}
 
-  def handle_call({:subscribe, track, options}, {owner, _tag}, state) do
-    {catalog?, options} = Keyword.pop(options, :catalog?, false)
+  def handle_call({:discover, prefix, options}, {owner, _tag}, state) do
+    case MOQX.discover(state.client, prefix, options) do
+      {:ok, discovery} ->
+        monitor = Process.monitor(owner)
+        entry = %{owner: owner, monitor: monitor}
 
+        state = %{
+          state
+          | discoveries: Map.put(state.discoveries, discovery, entry),
+            monitors: Map.put(state.monitors, monitor, {:discovery, discovery})
+        }
+
+        {:reply, {:ok, discovery}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:cancel_discovery, discovery}, {owner, _tag}, state) do
+    case state.discoveries[discovery] do
+      %{owner: ^owner} -> {:reply, MOQX.cancel_discovery(state.client, discovery), state}
+      nil -> {:reply, :ok, state}
+      _ -> {:reply, {:error, :not_discovery_owner}, state}
+    end
+  end
+
+  def handle_call({:subscribe, track, options}, {owner, _tag}, state) do
     case MOQX.subscribe(state.client, track, options) do
       {:ok, subscription} ->
         monitor = Process.monitor(owner)
 
-        entry = %{owner: owner, monitor: monitor, catalog?: catalog?}
+        entry = %{owner: owner, monitor: monitor}
 
         state = %{
           state
@@ -127,6 +167,10 @@ defmodule Membrane.MOQX.Session do
 
   def handle_info({:DOWN, monitor, :process, _owner, _reason}, state) do
     case state.monitors[monitor] do
+      {:discovery, discovery} ->
+        _result = MOQX.cancel_discovery(state.client, discovery)
+        {:noreply, drop_discovery(state, discovery, false)}
+
       nil ->
         {:noreply, state}
 
@@ -146,22 +190,32 @@ defmodule Membrane.MOQX.Session do
 
   def terminate(_reason, _state), do: :ok
 
-  defp event_recipients(%MOQX.Event.CatalogReceived{}, state) do
-    recipients =
-      state.subscriptions
-      |> Map.values()
-      |> Enum.filter(& &1.catalog?)
-      |> Enum.map(& &1.owner)
-      |> Enum.uniq()
-
-    {state, recipients}
-  end
-
   defp event_recipients(%MOQX.Event.ConnectionClosed{}, state),
     do: {state, all_owners(state)}
 
   defp event_recipients(%MOQX.Event.ProtocolFailed{}, state),
     do: {state, all_owners(state)}
+
+  defp event_recipients(%module{discovery: discovery} = event, state)
+       when module in [
+              MOQX.Event.DiscoveryReady,
+              MOQX.Event.BroadcastAvailable,
+              MOQX.Event.BroadcastWithdrawn,
+              MOQX.Event.DiscoveryDone
+            ] do
+    case state.discoveries[discovery] do
+      nil ->
+        {state, []}
+
+      %{owner: owner} ->
+        state =
+          if match?(%MOQX.Event.DiscoveryDone{}, event),
+            do: drop_discovery(state, discovery),
+            else: state
+
+        {state, [owner]}
+    end
+  end
 
   defp event_recipients(event, state) do
     case event_subscription(event) do
@@ -189,6 +243,12 @@ defmodule Membrane.MOQX.Session do
   end
 
   defp event_subscription(%MOQX.Event.SubscriptionAccepted{subscription: subscription}),
+    do: subscription
+
+  defp event_subscription(%MOQX.Event.CatalogReceived{subscription: subscription}),
+    do: subscription
+
+  defp event_subscription(%MOQX.Event.CatalogFailed{subscription: subscription}),
     do: subscription
 
   defp event_subscription(%MOQX.Event.SubscriptionFailed{subscription: subscription}),
@@ -226,10 +286,20 @@ defmodule Membrane.MOQX.Session do
   end
 
   defp all_owners(state) do
-    state.subscriptions
-    |> Map.values()
+    (Map.values(state.subscriptions) ++ Map.values(state.discoveries))
     |> Enum.map(& &1.owner)
     |> Enum.uniq()
+  end
+
+  defp drop_discovery(state, discovery, demonitor? \\ true) do
+    case Map.pop(state.discoveries, discovery) do
+      {nil, _} ->
+        state
+
+      {%{monitor: monitor}, discoveries} ->
+        if demonitor?, do: Process.demonitor(monitor, [:flush])
+        %{state | discoveries: discoveries, monitors: Map.delete(state.monitors, monitor)}
+    end
   end
 
   defp normalize_unsubscribe(:ok), do: :ok

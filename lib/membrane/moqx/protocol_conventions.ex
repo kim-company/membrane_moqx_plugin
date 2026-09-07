@@ -3,13 +3,13 @@ defmodule Membrane.MOQX.ProtocolConventions do
   Pure adaptation between explicit MOQX protocols and Membrane publication intent.
 
   MOQX owns protocol state and wire behavior. This module owns only deployed
-  catalog naming/schema choices and the options needed to express one canonical
+  CMSF schema helpers and the options needed to express one canonical
   `Membrane.MOQX.Track` through MOQX's public API.
 
-  Lite selects no automatic catalog or initialization publication, even with
-  a catalog-name override. That describes this plugin's exact-track profile,
-  not a transport restriction. HANG catalog/media conventions are not supplied
-  by this module.
+  Element catalog names now come from the explicit MOQX application profile.
+  This module's protocol-only catalog helpers describe the older CMSF
+  conventions and return no Lite catalog; they do not override a selected HANG
+  profile. HANG catalog/media conventions are not supplied by this module.
   """
 
   alias Membrane.MOQX.Track

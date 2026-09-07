@@ -21,8 +21,10 @@ defmodule Membrane.MOQX.Source do
 
   The caller supplies the exact track and its canonical stream format. This
   element does not discover broadcasts, parse HANG catalogs, infer codecs,
-  demux media, or pace playback. Use `Membrane.MOQX.CatalogSource` only for its
-  supported CMSF catalog profiles.
+  demux media, or pace playback. Use `Membrane.MOQX.CatalogSource` with an
+  explicit HANG or CMSF profile for catalog offers. Empty Lite groups currently
+  produce no buffer or discontinuity event; HANG codec-epoch discontinuities
+  are not supported.
 
   Output uses push flow control. Subscriber demand at a remote publisher is
   not downstream Membrane demand. Completion describes the received protocol

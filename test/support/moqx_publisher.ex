@@ -92,7 +92,8 @@ defmodule Membrane.MOQX.TestPublisher do
          :ok <- validate_track(subscribe, track),
          {:ok, ctx} <- accept_subscription(ctx, control, subscribe.request_id),
          {:ok, ctx} <- send_objects(ctx, conn, subscribe.request_id, objects),
-         {:ok, ctx} <- finish_subscription(ctx, control, subscribe.request_id, length(objects)) do
+         {:ok, ctx} <-
+           finish_subscription(ctx, control, subscribe.request_id, length(object_groups(objects))) do
       serve_subscriptions(ctx, conn, control, rest)
     end
   end
@@ -150,14 +151,20 @@ defmodule Membrane.MOQX.TestPublisher do
   end
 
   defp send_objects(ctx, conn, track_alias, objects) do
-    Enum.reduce_while(objects, {:ok, ctx}, fn object, {:ok, ctx} ->
+    Enum.reduce_while(object_groups(objects), {:ok, ctx}, fn [first | rest], {:ok, ctx} ->
+      bytes =
+        [subgroup_bytes(track_alias, first, true)] ++
+          Enum.map(rest, fn object ->
+            track_alias |> subgroup_bytes(object, true) |> subgroup_object_bytes()
+          end)
+
       with {:ok, stream, ctx} <-
              Transport.open_stream(ctx, conn, direction: :unidirectional),
            {:ok, _send, ctx} <-
              Transport.send_stream(
                ctx,
                stream,
-               Codec.encode_subgroup(track_alias, object),
+               bytes,
                finish: true
              ) do
         {:cont, {:ok, ctx}}
@@ -166,6 +173,9 @@ defmodule Membrane.MOQX.TestPublisher do
       end
     end)
   end
+
+  defp object_groups(objects),
+    do: Enum.chunk_by(objects, &{&1.group_id, &1.subgroup_id})
 
   defp send_interleaved_subgroups(
          ctx,

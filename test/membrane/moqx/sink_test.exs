@@ -49,6 +49,149 @@ defmodule Membrane.MOQX.SinkTest do
 
   require Pad
 
+  test "publishes a HANG CMAF video catalog through the explicit CMAF adapter" do
+    namespace = ["room", "cmaf.hang"]
+
+    info = %MOQX.Protocol.MOQLite05.Messages.TrackInfo{
+      timescale: 1_000_000,
+      publisher_priority: 127,
+      publisher_ordered: false,
+      publisher_max_latency: 0
+    }
+
+    payload =
+      JSON.encode!(%{
+        "video" => %{
+          "renditions" => %{
+            "video" => %{
+              "codec" => "avc1.640028",
+              "codedWidth" => 1920,
+              "codedHeight" => 1080,
+              "container" => %{"kind" => "cmaf", "init" => "aW5pdA=="}
+            }
+          }
+        }
+      })
+
+    relay = TestLite05Relay.start(namespace, "catalog.json", info, [{0, payload}], group: 1)
+
+    format = %Membrane.CMAF.Track{
+      content_type: :video,
+      header: "init",
+      resolution: {1920, 1080},
+      codecs: %{avc1: %{profile: "64", compatibility: "00", level: "28"}}
+    }
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:producer, %TestControlledSource{stream_format: format})
+          |> child(:adapter, %ToTrack{adapter: Membrane.MOQX.Hang.CMAF})
+          |> via_in(Pad.ref(:input, :video), options: [track_name: "video", timescale: 1_000_000])
+          |> child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: TestLite05Relay.transport(relay)
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:track_ready, _, "video"})
+    assert {:ok, ^info} = TestLite05Relay.subscribe(relay)
+    assert {:ok, _capture} = TestLite05Relay.capture(relay)
+    assert :ok = TestLite05Relay.unsubscribe(relay)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Relay.await_shutdown(relay)
+  end
+
+  test "a late HANG catalog subscriber receives the added Opus rendition" do
+    namespace = ["room", "speaker.hang"]
+
+    info = %MOQX.Protocol.MOQLite05.Messages.TrackInfo{
+      timescale: 1_000_000,
+      publisher_priority: 127,
+      publisher_ordered: false,
+      publisher_max_latency: 0
+    }
+
+    payload =
+      JSON.encode!(%{
+        "audio" => %{
+          "renditions" => %{
+            "opus" => %{
+              "codec" => "opus",
+              "sampleRate" => 48_000,
+              "numberOfChannels" => 2,
+              "container" => %{"kind" => "legacy"}
+            }
+          }
+        }
+      })
+
+    relay = TestLite05Relay.start(namespace, "catalog.json", info, [{0, payload}], group: 1)
+
+    format = %Membrane.MOQX.Track{
+      packaging: "hang/legacy",
+      initialization: nil,
+      selection_params: %{"codec" => "opus", "sampleRate" => 48_000, "numberOfChannels" => 2},
+      catalog_fields: %{"role" => "audio"}
+    }
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:producer, %TestControlledSource{stream_format: format})
+          |> via_in(Pad.ref(:input, :opus), options: [track_name: "opus", timescale: 48_000])
+          |> child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: TestLite05Relay.transport(relay)
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:track_ready, _, "opus"})
+    assert {:ok, ^info} = TestLite05Relay.subscribe(relay)
+    assert {:ok, _capture} = TestLite05Relay.capture(relay)
+    assert :ok = TestLite05Relay.unsubscribe(relay)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Relay.await_shutdown(relay)
+  end
+
+  test "publishes a retained empty HANG catalog with an explicit Lite application profile" do
+    namespace = ["room", "empty.hang"]
+
+    info = %MOQX.Protocol.MOQLite05.Messages.TrackInfo{
+      timescale: 1_000_000,
+      publisher_priority: 127,
+      publisher_ordered: false,
+      publisher_max_latency: 0
+    }
+
+    relay = TestLite05Relay.start(namespace, "catalog.json", info, [{0, "{}"}])
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: TestLite05Relay.transport(relay)
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
+    assert {:ok, ^info} = TestLite05Relay.subscribe(relay)
+    assert {:ok, _capture} = TestLite05Relay.capture(relay)
+    assert :ok = TestLite05Relay.unsubscribe(relay)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Relay.await_shutdown(relay)
+  end
+
   test "publishes MoQ Lite timestamps and emits demand only for the exact media track" do
     namespace = ["live"]
 
@@ -407,6 +550,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
         protocol: :draft_16,
+        profile: :moqtail_cmsf,
         namespace: namespace,
         transport: TestDraft16Relay.transport(relay),
         catalog_refresh_interval: 25,
@@ -491,6 +635,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
         protocol: :draft_16,
+        profile: :moqtail_cmsf,
         namespace: namespace,
         transport: TestDraft16Relay.transport(relay),
         catalog_refresh_interval: 25
@@ -527,6 +672,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
         protocol: :draft_16,
+        profile: :moqtail_cmsf,
         namespace: namespace,
         transport: TestDraft16Relay.transport(relay),
         catalog_refresh_interval: nil,
@@ -605,6 +751,7 @@ defmodule Membrane.MOQX.SinkTest do
           child(:sink, %Sink{
             endpoint: relay.endpoint,
             protocol: :draft_16,
+            profile: :moqtail_cmsf,
             namespace: namespace,
             transport: TestDraft16Relay.transport(relay),
             catalog_refresh_interval: nil,
@@ -685,6 +832,7 @@ defmodule Membrane.MOQX.SinkTest do
           child(:sink, %Sink{
             endpoint: relay.endpoint,
             protocol: :cloudflare_draft_14,
+            profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
             inbound_subscriptions: :controlled
@@ -739,6 +887,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
         protocol: :cloudflare_draft_14,
+        profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay),
         inbound_subscriptions: :controlled
@@ -795,6 +944,7 @@ defmodule Membrane.MOQX.SinkTest do
     sink = %Sink{
       endpoint: relay.endpoint,
       protocol: :cloudflare_draft_14,
+      profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay),
       inbound_subscriptions: :controlled
@@ -861,6 +1011,7 @@ defmodule Membrane.MOQX.SinkTest do
     sink = %Sink{
       endpoint: relay.endpoint,
       protocol: :cloudflare_draft_14,
+      profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay),
       inbound_subscriptions: :controlled
@@ -922,6 +1073,7 @@ defmodule Membrane.MOQX.SinkTest do
           child(:sink, %Sink{
             endpoint: relay.endpoint,
             protocol: :cloudflare_draft_14,
+            profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
             inbound_subscriptions: :controlled
@@ -981,6 +1133,7 @@ defmodule Membrane.MOQX.SinkTest do
           child(:sink, %Sink{
             endpoint: relay.endpoint,
             protocol: :cloudflare_draft_14,
+            profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
             inbound_subscriptions: :controlled
@@ -1027,6 +1180,7 @@ defmodule Membrane.MOQX.SinkTest do
           child(:sink, %Sink{
             endpoint: relay.endpoint,
             protocol: :cloudflare_draft_14,
+            profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
             inbound_subscriptions: :controlled,
@@ -1085,6 +1239,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
         protocol: :cloudflare_draft_14,
+        profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay),
         track_demand_events: true
@@ -1137,6 +1292,7 @@ defmodule Membrane.MOQX.SinkTest do
           child(:sink, %Sink{
             endpoint: relay.endpoint,
             protocol: :cloudflare_draft_14,
+            profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
             inbound_subscriptions: :controlled
@@ -1172,6 +1328,7 @@ defmodule Membrane.MOQX.SinkTest do
           child(:sink, %Sink{
             endpoint: controlled_relay.endpoint,
             protocol: :cloudflare_draft_14,
+            profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(controlled_relay),
             inbound_subscriptions: :controlled,
@@ -1216,6 +1373,7 @@ defmodule Membrane.MOQX.SinkTest do
           child(:sink, %Sink{
             endpoint: relay.endpoint,
             protocol: :cloudflare_draft_14,
+            profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
             inbound_subscriptions: :controlled,
@@ -1380,6 +1538,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
         protocol: :cloudflare_draft_14,
+        profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay)
       })
@@ -1443,6 +1602,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
         protocol: :cloudflare_draft_14,
+        profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay)
       })
@@ -1537,6 +1697,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
         protocol: :cloudflare_draft_14,
+        profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay)
       })
@@ -1618,6 +1779,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
         protocol: :cloudflare_draft_14,
+        profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay)
       })
@@ -1660,6 +1822,7 @@ defmodule Membrane.MOQX.SinkTest do
     sink = %Sink{
       endpoint: relay.endpoint,
       protocol: :cloudflare_draft_14,
+      profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
     }
@@ -1751,6 +1914,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
         protocol: :cloudflare_draft_14,
+        profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay)
       })
@@ -1792,6 +1956,7 @@ defmodule Membrane.MOQX.SinkTest do
     sink = %Sink{
       endpoint: relay.endpoint,
       protocol: :cloudflare_draft_14,
+      profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
     }
@@ -1826,6 +1991,7 @@ defmodule Membrane.MOQX.SinkTest do
     sink = %Sink{
       endpoint: relay.endpoint,
       protocol: :cloudflare_draft_14,
+      profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
     }
@@ -1851,6 +2017,7 @@ defmodule Membrane.MOQX.SinkTest do
     sink = %Sink{
       endpoint: relay.endpoint,
       protocol: :cloudflare_draft_14,
+      profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
     }
@@ -1905,6 +2072,7 @@ defmodule Membrane.MOQX.SinkTest do
     sink = %Sink{
       endpoint: relay.endpoint,
       protocol: :cloudflare_draft_14,
+      profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
     }
@@ -1936,6 +2104,7 @@ defmodule Membrane.MOQX.SinkTest do
     sink = %Sink{
       endpoint: relay.endpoint,
       protocol: :cloudflare_draft_14,
+      profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
     }
@@ -1963,6 +2132,7 @@ defmodule Membrane.MOQX.SinkTest do
     sink = %Sink{
       endpoint: relay.endpoint,
       protocol: :cloudflare_draft_14,
+      profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
     }
