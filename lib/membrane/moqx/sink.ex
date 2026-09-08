@@ -74,11 +74,14 @@ defmodule Membrane.MOQX.Sink do
   A parent can finish one accepted subscriber without withdrawing the track by
   sending `{:finish_subscription, request_handle, options}`.
 
-  Standard draft-16 publication waits for namespace and per-track readiness,
-  emits Moqtail-compatible inline-initialization catalogs, supports subgroup or
-  datagram delivery per pad, and refreshes its retained catalog for late
-  discovery. Cloudflare draft-14 preserves `.catalog`, separate initialization
-  tracks, and subgroup-only publication. Protocol selection is always explicit.
+  Draft-16 publication waits for namespace and per-track readiness and supports
+  subgroup or datagram delivery per pad. Cloudflare draft-14 uses subgroup-only
+  publication. These transport choices do not select a catalog profile:
+  `:moqtail_cmsf` embeds initialization in its catalog, while `:cloudflare_cmsf`
+  uses separate initialization tracks and defaults to `.catalog`. Catalog
+  profiles refresh their retained catalog for late discovery; `:none` creates
+  neither catalog nor initialization tracks. Protocol and profile selection
+  remain explicit, including accepted cross-protocol profile compositions.
 
   Raw MoQ Lite draft-05 publication uses exact tracks without an automatically
   generated catalog. Select `profile: :hang` for HANG catalog publication.

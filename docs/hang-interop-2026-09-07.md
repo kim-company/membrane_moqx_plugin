@@ -396,3 +396,37 @@ artifacts are not a portable evidence archive. The public relay's deployed
 revision remains unknown. Optional Lite operations/bindings, LOC, untested
 codecs, real-time A/V synchronization and universal player compatibility remain
 outside the supported matrix in `Membrane.MOQX`.
+
+Final review checkpoint: `f199a3d` fixes an empty-group event queued before the
+first stream format never being drained on synchronous Lite readiness. The
+public-pipeline regression failed first (9082), then passed with 41 other
+Sink/initialization tests (9083); independent verification also passed all 42
+(749621). The full suite then passed **120 tests, 12 excluded** (9084), with
+strict Credo, formatting and whitespace checks clean. Review findings and
+verification are posted on PR #12. No plugin CI checks are configured.
+
+Released-dependency ordinary-media refresh used Chrome `152.0.7977.76` and the
+same pinned reference. All four forward publishers exited normally, and all
+eight forward/reverse checks passed:
+
+| Path | Actual decoded video frames | Audio observation |
+| --- | ---: | --- |
+| Plugin -> player, local Legacy | 20 | Advancing audio to 1969ms; peak 0.08899 |
+| Plugin -> player, public Legacy | 21 | Advancing audio to 2006.75ms; peak 0.08894 |
+| Plugin -> player, local CMAF | 20 | Advancing audio to 2005.33ms; peak 0.09092 |
+| Plugin -> player, public CMAF | 20 | Advancing audio to 1965.08ms; peak 0.09092 |
+| Reference -> plugin, local Legacy | 25 | 298560 decoded samples/channel; peak 0.10172 |
+| Reference -> plugin, public Legacy | 25 | 259200 decoded samples/channel; peak 0.09034 |
+| Reference -> plugin, local CMAF | 30 | 286720 decoded s16 samples; peak 3050 |
+| Reference -> plugin, public CMAF | 30 | 288768 decoded s16 samples; peak 2901 |
+
+Reverse Legacy capture preserves arrival order; the offline decoder reordered
+nine audio positions in the public run (none locally). This is not real-time
+playback or synchronization certification. Exact commands, logs and captures
+are retained in `/private/tmp/moqx-010-decoded-proof.kLUPJj/RESULTS.md` and its
+sibling artifacts; the durable reproduction recipes remain in the repository.
+The reverse-CMAF commands and decode output are in `CMAF-RESULTS.md` alongside
+the same artifacts. Its initial local Rust reference publisher rejected the
+browser fixture certificate (`CaUsedAsEndEntity`); the successful rerun used
+the existing pinned relay on port 24463 with its proper CA. Certificate
+verification was never disabled, and the failed attempt remains recorded.
