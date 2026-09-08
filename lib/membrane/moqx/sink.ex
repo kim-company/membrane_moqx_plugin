@@ -13,6 +13,11 @@ defmodule Membrane.MOQX.Sink do
   Lite05 and publishes retained `catalog.json` snapshots through MOQX's catalog
   API. A new HANG publication starts with an empty catalog; dynamic media tracks
   replace that snapshot. Media packaging must match the selected profile.
+  `catalog_compression: :deflate` selects HANG `catalog.json.z` and actual
+  DEFLATE encoding through MOQX. The default `:none` uses `catalog.json`.
+  A Sink publishes one selected encoding, without dual-format publication or
+  fallback. CMSF/raw DEFLATE and mismatched conventional names are rejected.
+  Compressed HANG must use `catalog.json.z`: MOQX selects decoding by that name.
   Use `Membrane.MOQX.Hang.Legacy` for Opus/H.264 legacy framing, or
   `Membrane.MOQX.Hang.CMAF` with `TrackAdapter.ToTrack` for H.264/AAC CMAF.
   These are explicit adapters; this Sink does not encode media or add framing.
@@ -35,20 +40,29 @@ defmodule Membrane.MOQX.Sink do
   and applies EOS only after all earlier events. Identical consecutive formats
   do not create a new generation. This is an in-memory queue, not backpressure;
   upstream flow control remains the application's responsibility.
-  MOQX 0.9.0 still has a Lite cancellation/late-group-FIN defect: a receiver
-  cancelling an initialization subscription can lose its whole connection.
-  Cross-profile Lite initialization is not release-certified until that upstream
-  fix is consumed; do not substitute an arbitrary cancellation delay.
+  MOQX 0.10.0 isolates late initialization-subscription replies and group tails;
+  no arbitrary cancellation delay is added here.
 
   With `inbound_subscriptions: :controlled`, typed MOQX requests are surfaced
   as `{:subscription_requested, request}` parent notifications. The parent
   explicitly accepts or rejects them through child notifications. Approval may
   precede dynamic pad creation; the Sink waits until the named track is
   registered before accepting it through MOQX.
-  This is not a guarantee of absent-track provisioning through every relay:
-  the pinned moq-dev Lite05 relay requests TrackInfo before admission, and
-  MOQX 0.9.0 rejects TrackInfo for an unregistered track. With that relay,
-  register the track first; controlled admission still applies afterward.
+  Lite relays can request metadata before subscription admission. Opt into
+  `missing_track_metadata: :controlled` to receive
+  `{:track_metadata_requested, request}`. Adding the named dynamic pad and its
+  stream format registers the track and answers pending metadata requests;
+  it does not authorize controlled subscriptions. Reject a metadata request with
+  `{:reject_track_request, request, %MOQX.SubscriptionRejection{}}`.
+  `{:track_metadata_request_done, event}` preserves MOQX's typed request and
+  terminal outcome, including reply failure. A rejected/stale decision reports
+  `{:track_metadata_decision_failed, request, reason}` without killing the Sink.
+  Local registration remains usable even if one metadata reply fails; the
+  terminal event is transport admission, not peer delivery. Retry/provisioning
+  policy remains parent-owned. MOQX bounds pending requests with
+  `track_metadata_timeout` (default 5 seconds) and `max_pending_track_metadata`
+  (default 128). The default policy is `:reject`; controlled metadata demand is
+  Lite-only and independent of `inbound_subscriptions`.
 
   Subscriber join/leave notifications include the track's current subscriber
   count on this MOQX connection, not the viewer count behind a relay. A relay
@@ -72,7 +86,12 @@ defmodule Membrane.MOQX.Sink do
   provide a positive `timescale`; it may also set track-specific
   `publisher_priority`, `publisher_max_latency`, retention, and reliable
   subgroup delivery. PTS is rounded to the nearest track tick (exact halves
-  round up) and must be non-negative and non-decreasing.
+  round up) and must be non-negative and non-decreasing within an epoch.
+  `Membrane.MOQX.Event.EmptyGroup` publishes a genuine zero-object Lite group,
+  advances the Sink-owned group ID, and permits a new backward-PTS epoch.
+  Incoming event coordinates are informational, not publication coordinates.
+  The preceding group must already be complete; partial groups and non-Lite
+  protocols reject this event. It is not a zero-byte object, MediaEnd or EOS.
 
       child(:producer, producer)
       |> via_in(Pad.ref(:input, :opus),
@@ -126,6 +145,7 @@ defmodule Membrane.MOQX.Sink do
               connect_options: [spec: keyword(), default: []],
               transport: [spec: term(), default: nil],
               catalog_track_name: [spec: binary() | nil, default: nil],
+              catalog_compression: [spec: :none | :deflate, default: :none],
               publisher_priority: [spec: 0..255, default: 127],
               catalog_refresh_interval: [spec: pos_integer() | nil, default: 1_000],
               inbound_subscriptions: [
@@ -134,6 +154,9 @@ defmodule Membrane.MOQX.Sink do
               ],
               subscription_decision_timeout: [spec: non_neg_integer(), default: 5_000],
               max_pending_subscriptions: [spec: pos_integer(), default: 128],
+              missing_track_metadata: [spec: :reject | :controlled, default: :reject],
+              track_metadata_timeout: [spec: non_neg_integer(), default: 5_000],
+              max_pending_track_metadata: [spec: pos_integer(), default: 128],
               infrastructure_subscriptions: [
                 spec: :automatic | :controlled,
                 default: :automatic
@@ -146,14 +169,11 @@ defmodule Membrane.MOQX.Sink do
     :ok = MOQX.Profile.validate(options.profile, protocol.id())
 
     catalog_name =
-      case options.profile do
-        :none ->
-          nil
-
-        profile ->
-          {:ok, name} = MOQX.Profile.track_name(profile, :none)
-          options.catalog_track_name || name
-      end
+      ProtocolConventions.profile_catalog_track_name(
+        options.profile,
+        options.catalog_compression,
+        options.catalog_track_name
+      )
 
     state =
       options
@@ -567,6 +587,42 @@ defmodule Membrane.MOQX.Sink do
     {[], update_in(state, [:pads, pad, :queued_events], &:queue.in(event, &1))}
   end
 
+  @impl true
+  def handle_event(pad, %Membrane.MOQX.Event.EmptyGroup{} = event, _ctx, state) do
+    unless ProtocolConventions.moq_lite_05?(state.protocol) do
+      raise ArgumentError, "empty groups require MoQ Lite 05"
+    end
+
+    pad_state = Map.fetch!(state.pads, pad)
+
+    cond do
+      pad_state.ended? ->
+        raise ArgumentError, "cannot publish an empty group after track EOS"
+
+      not pad_state.ready? ->
+        queue_pad_event(pad, {:event, event}, state)
+
+      pad_state.object_id != 0 ->
+        raise ArgumentError, "finish the current group before publishing an empty group"
+
+      true ->
+        case MOQX.publish_empty_group(state.client, pad_state.media_track, pad_state.group_id) do
+          :ok ->
+            {[],
+             put_in(state, [:pads, pad], %{
+               pad_state
+               | group_id: pad_state.group_id + 1,
+                 last_pts: nil
+             })}
+
+          {:error, reason} ->
+            raise "failed to publish empty MOQX group: #{inspect(reason)}"
+        end
+    end
+  end
+
+  def handle_event(_pad, _event, _ctx, state), do: {[], state}
+
   defp publish_buffer(pad, buffer, pad_state, state) do
     with {:ok, unit} <- Unit.from_buffer(buffer),
          {:ok, timestamp} <- object_timestamp(buffer, pad_state, state),
@@ -600,6 +656,21 @@ defmodule Membrane.MOQX.Sink do
   end
 
   @impl true
+  def handle_parent_notification(
+        {:reject_track_request, %MOQX.PublicationTrackRequest{} = request,
+         %MOQX.SubscriptionRejection{} = rejection},
+        _ctx,
+        state
+      ) do
+    case MOQX.reject_track_request(state.client, request, rejection) do
+      :ok ->
+        {[], state}
+
+      {:error, reason} ->
+        {[notify_parent: {:track_metadata_decision_failed, request, reason}], state}
+    end
+  end
+
   def handle_parent_notification(
         {:accept_subscription, %MOQX.PublicationSubscriptionRequest{} = request},
         _ctx,
@@ -678,6 +749,20 @@ defmodule Membrane.MOQX.Sink do
   def handle_parent_notification(_notification, _ctx, state), do: {[], state}
 
   @impl true
+  def handle_info(
+        {:moqx, client, %MOQX.Event.PublicationTrackRequested{request: request}},
+        _ctx,
+        %{client: client} = state
+      ),
+      do: {[notify_parent: {:track_metadata_requested, request}], state}
+
+  def handle_info(
+        {:moqx, client, %MOQX.Event.PublicationTrackRequestDone{} = event},
+        _ctx,
+        %{client: client} = state
+      ),
+      do: {[notify_parent: {:track_metadata_request_done, event}], state}
+
   def handle_info(
         {:moqx, client, %MOQX.Event.PublicationReady{publication: publication}},
         _ctx,
@@ -813,6 +898,7 @@ defmodule Membrane.MOQX.Sink do
   defp register_catalog_track(client, publication, state) do
     options = [
       profile: if(state.profile == :hang, do: :hang, else: :none),
+      compression: state.catalog_compression,
       retention: :latest,
       timescale: 1_000_000,
       publisher_priority:
@@ -959,14 +1045,28 @@ defmodule Membrane.MOQX.Sink do
     |> put_if_present(:transport, state.transport)
   end
 
-  defp publication_options(%{inbound_subscriptions: :automatic}), do: []
-
   defp publication_options(state) do
-    [
-      inbound_subscriptions: :controlled,
-      subscription_decision_timeout: state.subscription_decision_timeout,
-      max_pending_subscriptions: state.max_pending_subscriptions
-    ]
+    admission =
+      if state.inbound_subscriptions == :controlled do
+        [
+          inbound_subscriptions: :controlled,
+          subscription_decision_timeout: state.subscription_decision_timeout,
+          max_pending_subscriptions: state.max_pending_subscriptions
+        ]
+      else
+        []
+      end
+
+    if state.missing_track_metadata == :controlled do
+      admission ++
+        [
+          missing_track_metadata: :controlled,
+          track_metadata_timeout: state.track_metadata_timeout,
+          max_pending_track_metadata: state.max_pending_track_metadata
+        ]
+    else
+      admission
+    end
   end
 
   defp put_if_present(options, _key, nil), do: options
@@ -1046,6 +1146,9 @@ defmodule Membrane.MOQX.Sink do
 
   defp replay_pad_event(pad, :end_of_stream, state),
     do: handle_end_of_stream(pad, nil, state)
+
+  defp replay_pad_event(pad, {:event, event}, state),
+    do: handle_event(pad, event, nil, state)
 
   defp published_track_for_name(state, track_name) do
     if state.catalog_track && published_track_name(state.catalog_track) == track_name do

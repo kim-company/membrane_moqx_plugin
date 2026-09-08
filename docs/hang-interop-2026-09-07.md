@@ -347,3 +347,52 @@ supersede the unresolved registration defect above, but do not explain every
 earlier intermittent failure or certify public-browser reset stability. Neither
 upstream PR is merged/released by this work; the real plugin dependency remains
 MOQX 0.9.0 and the remaining plugin feature integrations are still outstanding.
+
+## Released dependency and plugin integration (2026-09-08)
+
+This addendum supersedes the dependency and missing-feature gates in the
+historical checkpoints above, without retroactively changing their results.
+MOQX PRs #49/#50 are merged, followed by release PR #51. Published
+[MOQX 0.10.0](https://hex.pm/packages/moqx/0.10.0) is tagged at
+`36859732f8faaed520352c6c34da7834e3c885f4`; its release workflow succeeded.
+The plugin now resolves the official Hex archive, not a path override or
+candidate source checkout.
+
+- Sink exposes bounded opt-in missing-track metadata provisioning, scoped
+  completion/rejection notifications and separate subscription admission.
+  Public-pipeline tests cover accept, reject, timeout and stale decisions.
+- Empty groups are preserved as `Event.EmptyGroup` through Source and HANG
+  framing, distinct from zero-byte objects, MediaEnd and EOS. Sink publishes
+  them in input order, including its initialization FIFO. Native HANG selection
+  verifies a backwards timestamp epoch and a final empty group before EOS.
+- HANG catalogs support explicit plain or DEFLATE encoding with matching
+  catalog names. Live and late readers, concurrent consumers, recognized
+  configuration replacement, unknown codecs and removal have regression tests.
+- Source/Session expose owner-scoped runtime subscription updates; CatalogSource
+  routes selected-pad commands. Local command admission and asynchronous peer
+  acknowledgement/rejection are separate contracts. These have hermetic public
+  wire/pipeline coverage, not a claim of native relay update certification.
+- The released-dependency hermetic suite passed 119 tests with 12 integrations
+  excluded (seed 898561); strict Credo was clean. Native epoch/raw/shared-Source
+  suites passed four tests locally (770054) and publicly (296210). Native
+  metadata provisioning passed three tests locally (73842) and publicly (428015).
+- The pinned reference player decoded plugin-published Opus through three real
+  epochs (5s, 10s, 0s): 150 non-silent `AudioData` outputs, resets exactly after
+  outputs 50 and 100, three configurations and zero browser/decoder errors.
+  One local run and three consecutive public cdn.moq.dev runs passed. Unlike
+  the earlier direct-MOQX candidate experiment, the publisher is the real
+  `TestControlledSource -> Hang.Legacy -> Sink` pipeline. Receiver ordering and
+  decoder reset logic remain the reference player's responsibility.
+- An initial local harness run decoded its first epoch but failed on HTTP 404
+  console errors. Giving the new page a data favicon removed the fixture error;
+  the failed trace was retained. These passing runs do not establish a cause
+  for the earlier candidate-only public decoder failure.
+
+Artifacts for this checkpoint were retained under the task-local
+`/private/tmp/plugin-0.10-proof.LID7BS`: `local-epochs.json` (failed fixture),
+`local-epochs-trace.json`, and `public-epochs.json`, `public-epochs-2.json`,
+`public-epochs-3.json` (passing). Reproduction scripts are committed; temporary
+artifacts are not a portable evidence archive. The public relay's deployed
+revision remains unknown. Optional Lite operations/bindings, LOC, untested
+codecs, real-time A/V synchronization and universal player compatibility remain
+outside the supported matrix in `Membrane.MOQX`.

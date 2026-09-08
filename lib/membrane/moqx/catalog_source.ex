@@ -17,12 +17,23 @@ defmodule Membrane.MOQX.CatalogSource do
   The parent may explicitly select that track on a new output link after the
   failed branch is removed. Neither catalog refreshes nor Source failures retry
   a selection automatically. Catalog/session failures still terminate this Bin.
+  Runtime subscription updates target a particular selection pad:
+  `{:update_subscription, output_pad_ref, request_id, options}`. The selected
+  Source's result and peer notifications use the existing `:track_source`
+  envelope. Unknown or not-ready selections instead report a direct
+  `{:subscription_update_result, request_id, {:error, reason}}`. A track address
+  alone is insufficient because multiple pads may select the same track.
 
   Select `profile` independently from `protocol`: `:moqtail_cmsf` defaults to
   `catalog`, `:cloudflare_cmsf` to `.catalog`, and `:hang` to `catalog.json`.
   MOQX validates supported compositions; HANG currently requires Lite05.
   A catalog name override changes the address, never the schema. `:none` is
   rejected; use `Membrane.MOQX.Source` for an opaque exact track.
+  HANG `catalog_compression: :deflate` selects `catalog.json.z`; the default
+  `:none` selects plain `catalog.json`. Encoding and conventional name must
+  agree. Custom compressed names and CMSF DEFLATE are rejected, because MOQX's
+  HANG subscription decoder selects DEFLATE by the conventional name. There is
+  no automatic fallback or concurrent subscription to both encodings.
 
   CMSF inline initialization is preserved; Cloudflare `initTrack` values retain
   their separate subscription path. HANG decoder metadata becomes canonical
@@ -50,7 +61,7 @@ defmodule Membrane.MOQX.CatalogSource do
 
   import Membrane.ChildrenSpec
 
-  alias Membrane.MOQX.{Session, Source, Track, TrackOffer}
+  alias Membrane.MOQX.{ProtocolConventions, Session, Source, Track, TrackOffer}
   alias MOQX.Protocol.Resolver
 
   def_output_pad :output,
@@ -71,7 +82,8 @@ defmodule Membrane.MOQX.CatalogSource do
               timeout: [spec: pos_integer(), default: 5_000],
               connect_options: [spec: keyword(), default: []],
               transport: [spec: term(), default: nil],
-              catalog_track_name: [spec: binary() | nil, default: nil]
+              catalog_track_name: [spec: binary() | nil, default: nil],
+              catalog_compression: [spec: :none | :deflate, default: :none]
 
   @impl true
   def handle_init(_ctx, options) do
@@ -81,8 +93,13 @@ defmodule Membrane.MOQX.CatalogSource do
 
     {:ok, protocol} = Resolver.fetch(options.protocol)
     :ok = MOQX.Profile.validate(options.profile, protocol.id())
-    {:ok, default_name} = MOQX.Profile.track_name(options.profile, :none)
-    catalog_track_name = options.catalog_track_name || default_name
+
+    catalog_track_name =
+      ProtocolConventions.profile_catalog_track_name(
+        options.profile,
+        options.catalog_compression,
+        options.catalog_track_name
+      )
 
     state =
       options
@@ -219,6 +236,26 @@ defmodule Membrane.MOQX.CatalogSource do
   end
 
   def handle_info(_message, _ctx, state), do: {[], state}
+
+  @impl true
+  def handle_parent_notification({:update_subscription, pad, request_id, options}, _ctx, state) do
+    case state.pads[pad] do
+      %{child: child} when not is_nil(child) ->
+        {[notify_child: {child, {:update_subscription, request_id, options}}], state}
+
+      %{child: nil} ->
+        {[
+           notify_parent:
+             {:subscription_update_result, request_id, {:error, :selection_not_ready}}
+         ], state}
+
+      nil ->
+        {[notify_parent: {:subscription_update_result, request_id, {:error, :unknown_selection}}],
+         state}
+    end
+  end
+
+  def handle_parent_notification(_notification, _ctx, state), do: {[], state}
 
   @impl true
   def handle_child_notification(notification, child, _ctx, state) do

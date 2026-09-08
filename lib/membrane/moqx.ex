@@ -12,12 +12,12 @@ defmodule Membrane.MOQX do
   Built-in protocol selections are `:moq_lite_05`, `:draft_16`, and
   `:cloudflare_draft_14`, over native QUIC through MOQX. Selection is explicit;
   an endpoint does not negotiate a different implementation automatically.
-  Draft-18 and WebTransport are not implemented by this plugin's MOQX 0.9.0
+  Draft-18 and WebTransport are not implemented by this plugin's MOQX 0.10.0
   baseline.
 
   * `Membrane.MOQX.Source` receives one known track with caller-supplied format.
   * `Membrane.MOQX.Sink` publishes dynamic tracks and exposes controlled
-    subscription decisions and optional aggregate demand notifications.
+    metadata provisioning, subscription decisions, and aggregate demand notifications.
   * `Membrane.MOQX.CatalogSource` interprets explicitly selected HANG or CMSF
     catalog profiles and offers tracks for pipeline-controlled attachment.
   * `Membrane.MOQX.Session` shares a client and routes subscription and Lite
@@ -31,16 +31,17 @@ defmodule Membrane.MOQX do
   for Opus/H.264 or `Membrane.MOQX.Hang.CMAF` for H.264/AAC CMAF. These adapters
   do not encode, decode, pace, or reorder playback. LOC is not implemented.
 
-  Full Lite/HANG support is incomplete: the pinned relay cannot request an
-  absent track through controlled admission alone (MOQX #47), and MOQX 0.9.0
-  cannot publish the empty groups needed for HANG codec-epoch discontinuities
-  (MOQX #48). Register tracks before relay admission. Do not use this version
-  for discontinuous codec epochs or interpret an empty-payload media endpoint
-  as an empty-group discontinuity.
+  Lite metadata provisioning and subscription authorization are separate
+  parent-owned decisions. `Sink.missing_track_metadata: :controlled` permits
+  creating a requested track by adding its pad/format before admission. A
+  genuine `Event.EmptyGroup` starts a new codec epoch without a payload or
+  timestamp; HANG adapters preserve that boundary, and the decoder owner
+  applies the reset. It is not a zero-byte object, MediaEnd, or EOS.
 
   ## Pinned capability matrix
 
-  This matrix uses MOQX 0.9.0 and moq-dev/moq commit
+  This matrix uses published MOQX 0.10.0, Lite `draft-lcurley-moq-lite-05`,
+  and moq-dev/moq commit
   `fd477082c43c3c0738fb62d077d85ea078f10045`. Test names below refer to repository
   ExUnit modules; the dated evidence report contains native/browser runs.
 
@@ -49,14 +50,24 @@ defmodule Membrane.MOQX do
   | Raw Lite exact tracks, PTS and final-buffer/EOS | Source/Sink; SourceTest, SinkTest, LiteRoundtripTest; local/public QUIC | Implemented, verified for exercised paths |
   | Broadcast snapshot/add/remove/cancel and owner isolation | Session; SessionTest; native HANG roundtrip distinguishes track withdrawal from broadcast departure on local/public relays | Implemented, tested |
   | HANG catalog offers, selection, malformed snapshots and removal | CatalogSource/TrackOffer; CatalogSourceTest and LiteRoundtripTest: retained offers through malformed snapshots, deselection/reselection, rejection and parent-managed replacement | Selected Sources are isolated; catalog and sibling selections survive. Parent handles removed output pads/downstream branches; no automatic retry |
-  | Empty/late HANG catalog publication | Sink; SinkTest and native HANG roundtrip | Implemented, tested |
+  | Plain/DEFLATE HANG catalog publication and retrieval | Sink/CatalogSource `catalog_compression`; HangCatalogLifecycleTest, CompressedCatalogTest: concurrent/late readers, configuration changes, usable/unsupported coexistence, actual DEFLATE bytes, removal | Implemented, tested; one encoding per publication, no fallback or dual-format publication |
   | Legacy Opus/H.264 framing, PTS, keyframe flags and MediaEnd | Hang.Legacy; HangLegacyTest; both reference directions local/public, including independent decoded output | Implemented, verified for pinned stack; reverse decoder orders groups offline, not a plugin playback guarantee |
   | H.264/AAC CMAF metadata and chunks | Hang.CMAF; HangCMAFTest and SinkTest; both reference directions local/public | Implemented, verified for pinned stack |
-  | Multi-subscriber demand and owner teardown | LiteRoundtripTest and native LiteMultiSourceTest: shared Sources, abrupt departure, survivor media, zero demand and resubscription; SinkTest: controlled decisions | Exercised paths verified hermetically and on local/public relays; absent-track admission blocked |
+  | Multi-subscriber demand and owner teardown | LiteRoundtripTest and native LiteMultiSourceTest: shared Sources, abrupt departure, survivor media, zero demand and resubscription; SinkTest: controlled decisions | Exercised paths verified hermetically and on local/public relays |
   | Hermetic full Sink-to-Source semantic relay | LiteRoundtripTest: raw groups/PTS/immediate EOS and HANG catalog selection/media/offer withdrawal | Implemented, tested |
-  | Absent-track provisioning through pinned relay | Register metadata before controlled admission; MOQX #47 | Upstream-blocked |
-  | Empty-group HANG codec-epoch discontinuity | No publication operation or Source event; MOQX #48 | Upstream-blocked, unsupported |
+  | Absent-track provisioning before independent admission | Sink; MetadataProvisioningTest, native LiteMetadataProvisioningTest: dynamic registration, rejection, timeout, exact media/EOS, teardown | Implemented with published MOQX API; local/public native proof |
+  | Empty-group HANG codec-epoch discontinuity | Source/Sink Event.EmptyGroup; EmptyGroupSourceTest, EmptyGroupRoundtripTest, HangLegacyTest, HangCMAFTest | Implemented; explicit decoder reset/ordering ownership remains downstream |
+  | Runtime subscription updates | Session.update_subscription, Source parent command, CatalogSource pad command; SubscriptionUpdateTest checks ownership, stale/invalid decisions, wire options and nonterminal peer rejection | Implemented; local send admission is not a peer acknowledgement |
+  | Lite immutable track metadata, priority/order/latency and group ranges | TrackInfo reception, Sink pad options and subscription/update options through MOQX | Supported options are version-specific; invalid options retain upstream errors |
+  | Other Lite surfaces: FETCH, bandwidth PROBE, GOAWAY and datagram media | Not exposed by MOQX 0.10.0's Lite operations/delivery capabilities | Unsupported here; no emulation or silent fallback |
+  | Alternative bindings: WebTransport, Qmux/TCP/TLS and WebSocket | Plugin connections use native QUIC; browser proof uses a reference peer through a relay | Unsupported plugin transports; browser compatibility does not imply browser-native plugin transport |
   | LOC, other codecs and universal browser playback | Opaque transport/recognized catalog metadata is not decoder support | Unsupported by supplied adapters |
+
+  This is a native publication/subscription/discovery integration and explicit
+  media-profile matrix, not implementation of every optional Lite wire surface.
+  HANG compressed catalogs use `catalog.json.z`; custom compressed names are
+  unsupported because MOQX selects subscription decoding by that conventional
+  name. CMSF compression is not supported. Raw exact-track payloads remain opaque.
 
   ## Delivery and verification limits
 

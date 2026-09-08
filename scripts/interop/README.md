@@ -7,7 +7,7 @@ are embedded, persisted, or needed for the local/public anonymous cases.
 
 ## Pinned reference
 
-- MOQX: 0.9.0, from this project's lockfile.
+- MOQX: 0.10.0, from this project's lockfile.
 - moq-dev/moq: `fd477082c43c3c0738fb62d077d85ea078f10045` for relay and JS player.
 - Player: `@moq/watch` 0.5.2 at that commit, with its frozen Bun lockfile.
 - Relay: `moq-relay --server-version moq-lite-05` built with `cargo build --locked`.
@@ -160,6 +160,44 @@ FFmpeg then independently decodes those received files. Success requires at
 least twenty decoded video frames and at least 96,000 non-silent audio samples.
 This is capture-then-decode verification, not a real-time decoder embedded in
 core Source/Sink. Keep the codecs/muxers/decoders outside the transport elements.
+
+## Empty-group decoder epochs (MOQX 0.10.0)
+
+Copy `browser/epochs.html` and `browser/epochs.ts` into the pinned reference's
+`interop/` directory, and `browser/check-epochs.mjs` beside the installed
+Playwright package. Keep the Vite server above running. Use the synthetic
+`audio.ogg` fixture, the same relay/TLS settings as the forward proof, a unique
+broadcast, and a new result filename:
+
+```sh
+export MOQX_PLUGIN_DIR=/absolute/path/to/membrane_moqx_plugin
+export MOQX_INTEROP_MEDIA=/absolute/path/to/synthetic-media
+export MOQX_LITE_ENDPOINT=moql://cdn.moq.dev:443/anon
+export MOQX_LITE_CA_FILE=/etc/ssl/cert.pem
+export MOQX_BROWSER_RELAY=https://cdn.moq.dev/anon
+export MOQX_INTEROP_BROADCAST=your-test-namespace/epochs.hang
+export MOQX_PROOF_RESULT=/absolute/path/to/new-epoch-proof.json
+node /absolute/path/to/playwright-tools/check-epochs.mjs
+```
+
+The runner starts `publish_epochs.exs`, whose real plugin pipeline composes
+Legacy framing with Sink. It advances only after the reference decoder has
+produced fifty non-silent outputs for each epoch. Success requires 150 actual
+`AudioData` outputs, two resets at outputs 50/100, three Opus configurations,
+and no browser/decoder errors. Epoch timestamps are 5s, 10s and 0s; this is not
+a timestamped MediaEnd substitute. The JSON trace is created exclusively so
+failed evidence cannot be overwritten by a repeat.
+
+Native full-pipeline metadata and epoch lifecycle regressions can also run
+against either verified-TLS endpoint:
+
+```sh
+mise exec -- mix test --include integration \
+  test/integration/lite_metadata_provisioning_test.exs \
+  test/integration/lite_epoch_roundtrip_test.exs \
+  test/integration/lite_roundtrip_test.exs \
+  test/integration/lite_multi_source_test.exs
+```
 
 The harness does not substitute for the full lifecycle tests.
 Clean up only task-created processes/directories after

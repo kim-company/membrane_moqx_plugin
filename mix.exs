@@ -29,7 +29,7 @@ defmodule Membrane.MOQX.MixProject do
     [
       {:membrane_core, "~> 1.3.4"},
       {:membrane_cmaf_format, "~> 0.7.1"},
-      {:moqx, "~> 0.9.0"},
+      {:moqx, "~> 0.10.0"},
       {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false}
     ]
   end

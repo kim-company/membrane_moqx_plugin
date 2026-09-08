@@ -9,12 +9,36 @@ defmodule Membrane.MOQX.ProtocolConventions do
   Element catalog names now come from the explicit MOQX application profile.
   This module's protocol-only catalog helpers describe the older CMSF
   conventions and return no Lite catalog; they do not override a selected HANG
-  profile. HANG catalog/media conventions are not supplied by this module.
+  profile. Explicit profile-name/encoding validation below composes MOQX's public
+  profile names; catalog codecs and HANG media framing remain outside this module.
   """
 
   alias Membrane.MOQX.Track
 
   @type protocol :: :draft_16 | :cloudflare_draft_14 | :moq_lite_05 | module()
+
+  @doc "Resolves an explicit catalog profile and encoding without mislabeling payload bytes."
+  @spec profile_catalog_track_name(MOQX.Profile.t(), :none | :deflate, binary() | nil) ::
+          binary() | nil
+  def profile_catalog_track_name(:none, :none, _override), do: nil
+
+  def profile_catalog_track_name(profile, compression, override) do
+    case MOQX.Profile.track_name(profile, compression) do
+      {:ok, default} ->
+        name = override || default
+
+        if profile == :hang and
+             ((compression == :deflate and name != "catalog.json.z") or
+                (compression == :none and name == "catalog.json.z")) do
+          raise ArgumentError, "HANG catalog name does not match its explicit compression"
+        end
+
+        name
+
+      {:error, reason} ->
+        raise ArgumentError, "unsupported catalog profile/encoding: #{inspect(reason)}"
+    end
+  end
 
   @spec draft_16?(protocol()) :: boolean()
   def draft_16?(:draft_16), do: true

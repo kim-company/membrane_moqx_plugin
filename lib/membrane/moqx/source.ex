@@ -13,6 +13,14 @@ defmodule Membrane.MOQX.Source do
   `subscription_options` pass through to `MOQX.subscribe/3`, including
   protocol-neutral start/filter, priority, group order, delivery timeout, and
   extension parameters supported by the selected MOQX implementation.
+  The parent can send `{:update_subscription, request_id, options}` at runtime.
+  `{:subscription_update_result, request_id, result}` reports local transport
+  admission only. Actual peer responses independently report
+  `{:subscription_updated, track_ref, parameters}` or
+  `{:subscription_update_failed, track_ref, error}`; no command correlation is
+  inferred. Lite has no update acknowledgement. An invalid/stale update or a
+  draft-16 peer rejection does not by itself terminate the active Source.
+  Shared sessions enforce the calling Source's ownership of its subscription.
 
   For `:moq_lite_05`, the Source converts each frame timestamp from the
   immutable track timescale into Membrane nanoseconds. The timestamp is

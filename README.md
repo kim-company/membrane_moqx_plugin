@@ -9,7 +9,7 @@ imply compatibility with every current public relay. See the dated
 [relay compatibility and retirement policy](docs/relay-compatibility.md):
 Cloudflare draft-14 and authenticated draft-16 controlled publication have
 observed immediate-EOS delivery failures, and the current public Moqtail
-relay requires draft-18, which MOQX 0.9.0 does not implement.
+relay requires draft-18, which MOQX 0.10.0 does not implement.
 
 Protocol selection is always explicit. `moqx` owns transport,
 draft-specific wire/lifecycle state, typed events, subscriptions,
@@ -143,10 +143,14 @@ track offers. Compose `Hang.Legacy` for already-encoded Opus/H.264, or the
 
 Local/public plugin roundtrips, pinned reference-player decoding, and reverse
 reference CMAF reception are recorded in [the HANG evidence report](docs/hang-interop-2026-09-07.md).
-Full support remains incomplete: absent-track metadata provisioning is blocked
-by [MOQX #47](https://github.com/dmorn/moqx/issues/47), and empty-group codec-epoch
-discontinuities by [MOQX #48](https://github.com/dmorn/moqx/issues/48). LOC is not
-implemented. See [reproducible interop recipes](scripts/interop/README.md).
+MOQX 0.10.0 supplies bounded absent-track metadata provisioning and empty-group
+codec epochs. Sink exposes opt-in metadata decisions; Source and the HANG
+adapters preserve `Membrane.MOQX.Event.EmptyGroup` independently of media and EOS.
+HANG catalogs support explicit plain or DEFLATE encoding; selected subscriptions
+can be updated through parent commands. See the module documentation for exact
+options, notifications and the capability matrix. LOC, optional Lite FETCH,
+PROBE and GOAWAY, datagram delivery and alternative transport bindings are not
+implemented by the plugin. See [reproducible interop recipes](scripts/interop/README.md).
 
 A Source receives the immutable track timescale from `TRACK_INFO`. Frame
 timestamps are converted to Membrane nanoseconds independently of group and
