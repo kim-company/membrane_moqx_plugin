@@ -297,3 +297,35 @@ Full-suite verification passed 95 tests with eight opt-in integrations excluded
   has a public-pipeline regression and minimal fix; the cross-profile lifecycle
   design remains open in the review discussion. These observations do not close
   #10 or #11 and do not claim universal HANG/codec/browser support.
+
+Upstream candidate validation addendum (2026-09-08):
+
+- [MOQX PR #49](https://github.com/dmorn/moqx/pull/49) at `f00f996`
+  supplies empty groups and canceled-subscription group-tail isolation. An
+  isolated plugin checkout using that source candidate passed 99 tests with
+  eight integrations excluded (seed 317462); five independent full-suite
+  repeats also passed. An earlier intermittent failure remains unattributed;
+  passing repeats do not establish its cause or resolution.
+- [MOQX PR #50](https://github.com/dmorn/moqx/pull/50) at `99f3fca`
+  supplies bounded absent-track metadata provisioning. Combining the two
+  candidates required no textual conflict resolution. The combined upstream
+  suite passed 303 tests with 41 integrations excluded (seed 90217) on repeat.
+  Its first run failed the existing draft-16 catalog test with
+  `unknown_track_alias`; that test passed in isolation. This is not a claim of
+  repeat-stable combined validation.
+- These checks use isolated source candidates, not a published dependency.
+  This plugin still consumes MOQX 0.9.0. Neither upstream PR nor these test
+  results deliver the plugin's missing metadata-demand or discontinuity API;
+  released-dependency integration, regression coverage and module documentation
+  remain necessary before closing #10 or #11.
+- Upstream PR #49's documentation follow-up `b8629db` records actual pinned
+  reference-player Opus decoding: 150 `AudioData` outputs across 5s, 10s and 0s
+  epochs, resets after outputs 50 and 100, and non-silent PCM. Local and public
+  runs passed, but an earlier public run produced an extra reset and a decoder
+  `DataError`; its cause remains unknown. This is direct MOQX candidate proof,
+  not a plugin Source/Sink discontinuity roundtrip or stable public certification.
+- PR #50 review confirmed that a failed TrackInfo send can return a registration
+  error after committing the track, without returning its handle; retry then
+  reports `track_already_registered`. The public failure-injection regression
+  and [review finding](https://github.com/dmorn/moqx/pull/50#discussion_r3956433236)
+  make this a remaining API-contract release gate, not merely a missing log.
