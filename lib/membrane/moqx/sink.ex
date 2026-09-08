@@ -29,6 +29,12 @@ defmodule Membrane.MOQX.Sink do
   groups. On draft-16, separate initialization waits for relay track readiness;
   media readiness and catalog advertisement wait for both tracks. Format updates
   publish a new initialization generation before advertising that generation.
+  While readiness is pending, subsequent stream formats, buffers and EOS are
+  queued together in input order. Replay publishes media under its own format
+  generation, pauses again if another format needs initialization readiness,
+  and applies EOS only after all earlier events. Identical consecutive formats
+  do not create a new generation. This is an in-memory queue, not backpressure;
+  upstream flow control remains the application's responsibility.
   MOQX 0.9.0 still has a Lite cancellation/late-group-FIN defect: a receiver
   cancelling an initialization subscription can lose its whole connection.
   Cross-profile Lite initialization is not release-certified until that upstream
@@ -197,8 +203,7 @@ defmodule Membrane.MOQX.Sink do
           media_ready?: false,
           init_ready?: true,
           pending_notification: nil,
-          queued_buffers: [],
-          eos_pending?: false,
+          queued_events: :queue.new(),
           generation: 0,
           group_id: 0,
           object_id: 0,
@@ -266,7 +271,7 @@ defmodule Membrane.MOQX.Sink do
         {[], state}
 
       not pad_state.ready? ->
-        {[], put_in(state, [:pads, pad, :eos_pending?], true)}
+        queue_pad_event(pad, :end_of_stream, state)
 
       true ->
         case publish_end_of_track(state, pad_state) do
@@ -288,6 +293,9 @@ defmodule Membrane.MOQX.Sink do
         cond do
           is_nil(pad_state.track) ->
             prepare_initial_track(pad, stream_format, state)
+
+          not pad_state.ready? ->
+            queue_pad_event(pad, {:stream_format, stream_format}, state)
 
           stream_format == pad_state.track ->
             {[], state}
@@ -551,9 +559,12 @@ defmodule Membrane.MOQX.Sink do
     if pad_state.ready? do
       publish_buffer(pad, buffer, pad_state, state)
     else
-      pad_state = update_in(pad_state.queued_buffers, &(&1 ++ [buffer]))
-      {[], put_in(state, [:pads, pad], pad_state)}
+      queue_pad_event(pad, {:buffer, buffer}, state)
     end
+  end
+
+  defp queue_pad_event(pad, event, state) do
+    {[], update_in(state, [:pads, pad, :queued_events], &:queue.in(event, &1))}
   end
 
   defp publish_buffer(pad, buffer, pad_state, state) do
@@ -1006,39 +1017,35 @@ defmodule Membrane.MOQX.Sink do
 
   defp flush_ready_pad(pad, actions, state) do
     pad_state = Map.fetch!(state.pads, pad)
-    queued_buffers = pad_state.queued_buffers
-    eos_pending? = pad_state.eos_pending?
 
-    state =
-      put_in(state, [:pads, pad], %{
-        pad_state
-        | queued_buffers: [],
-          eos_pending?: false,
-          pending_notification: nil
-      })
+    case {pad_state.ready?, :queue.out(pad_state.queued_events)} do
+      {true, {{:value, event}, rest}} ->
+        state =
+          put_in(state, [:pads, pad], %{
+            pad_state
+            | queued_events: rest,
+              pending_notification: nil
+          })
 
-    {actions, state} =
-      Enum.reduce(queued_buffers, {actions, state}, fn buffer, {actions, state} ->
-        pad_state = Map.fetch!(state.pads, pad)
-        {next_actions, state} = publish_buffer(pad, buffer, pad_state, state)
-        {actions ++ next_actions, state}
-      end)
+        {next_actions, state} = replay_pad_event(pad, event, state)
+        flush_ready_pad(pad, actions ++ next_actions, state)
 
-    if eos_pending? do
-      pad_state = Map.fetch!(state.pads, pad)
+      {true, {:empty, _queue}} ->
+        {actions, put_in(state, [:pads, pad, :pending_notification], nil)}
 
-      case publish_end_of_track(state, pad_state) do
-        :ok ->
-          {eos_actions, state} = finish_track_eos(pad, pad_state, state)
-          {actions ++ eos_actions, state}
-
-        {:error, reason} ->
-          raise "failed to publish queued MOQX end-of-track: #{inspect(reason)}"
-      end
-    else
-      {actions, state}
+      _other ->
+        {actions, state}
     end
   end
+
+  defp replay_pad_event(pad, {:stream_format, format}, state),
+    do: handle_stream_format(pad, format, nil, state)
+
+  defp replay_pad_event(pad, {:buffer, buffer}, state),
+    do: handle_buffer(pad, buffer, nil, state)
+
+  defp replay_pad_event(pad, :end_of_stream, state),
+    do: handle_end_of_stream(pad, nil, state)
 
   defp published_track_for_name(state, track_name) do
     if state.catalog_track && published_track_name(state.catalog_track) == track_name do
