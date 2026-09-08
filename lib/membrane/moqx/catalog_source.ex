@@ -17,6 +17,9 @@ defmodule Membrane.MOQX.CatalogSource do
   The parent may explicitly select that track on a new output link after the
   failed branch is removed. Neither catalog refreshes nor Source failures retry
   a selection automatically. Catalog/session failures still terminate this Bin.
+  The component's `Membrane.UtilitySupervisor` owns the Session process, which
+  is linked to this Bin to preserve failure propagation. It is not restarted
+  automatically; component teardown also terminates the owned Session.
   Runtime subscription updates target a particular selection pad:
   `{:update_subscription, output_pad_ref, request_id, options}`. The selected
   Source's result and peer notifications use the existing `:track_source`
@@ -119,8 +122,12 @@ defmodule Membrane.MOQX.CatalogSource do
   end
 
   @impl true
-  def handle_setup(_ctx, state) do
-    with {:ok, session} <- Session.start_link(session_options(state)),
+  def handle_setup(ctx, state) do
+    with {:ok, session} <-
+           Membrane.UtilitySupervisor.start_link_child(
+             ctx.utility_supervisor,
+             {Session, session_options(state)}
+           ),
          catalog_ref = %MOQX.TrackRef{
            namespace: state.namespace,
            track: state.catalog_track_name
