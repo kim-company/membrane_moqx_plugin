@@ -430,3 +430,12 @@ the same artifacts. Its initial local Rust reference publisher rejected the
 browser fixture certificate (`CaUsedAsEndEntity`); the successful rerun used
 the existing pinned relay on port 24463 with its proper CA. Certificate
 verification was never disabled, and the failed attempt remains recorded.
+
+Approved supervision follow-up: `7418ffc` starts CatalogSource's Session under
+the component `Membrane.UtilitySupervisor`, linked to the Bin with no automatic
+restart. Existing public lifecycle tests passed before this topology-only
+refactor (14 tests, 9090); the complete suite passed afterward (120 tests,
+12 exclusions, 9091). Native raw/HANG epoch/shared-Source lifecycle tests passed
+again locally (four, 9092) and publicly (four, 9093). Strict Credo and formatting
+were clean. This is before/after behavior-preservation evidence, not a claim
+of a new failing behavioral regression for a supervision-only change.
