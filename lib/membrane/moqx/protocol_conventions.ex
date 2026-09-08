@@ -5,6 +5,11 @@ defmodule Membrane.MOQX.ProtocolConventions do
   MOQX owns protocol state and wire behavior. This module owns only deployed
   catalog naming/schema choices and the options needed to express one canonical
   `Membrane.MOQX.Track` through MOQX's public API.
+
+  Lite selects no automatic catalog or initialization publication, even with
+  a catalog-name override. That describes this plugin's exact-track profile,
+  not a transport restriction. HANG catalog/media conventions are not supplied
+  by this module.
   """
 
   alias Membrane.MOQX.Track

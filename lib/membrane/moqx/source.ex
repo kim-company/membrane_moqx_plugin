@@ -19,6 +19,16 @@ defmodule Membrane.MOQX.Source do
   independent of group and object coordinates; payload bytes and group
   boundaries remain unchanged.
 
+  The caller supplies the exact track and its canonical stream format. This
+  element does not discover broadcasts, parse HANG catalogs, infer codecs,
+  demux media, or pace playback. Use `Membrane.MOQX.CatalogSource` only for its
+  supported CMSF catalog profiles.
+
+  Output uses push flow control. Subscriber demand at a remote publisher is
+  not downstream Membrane demand. Completion describes the received protocol
+  lifecycle, not proof that every intended publisher buffer arrived; see
+  `Membrane.MOQX` for the observed relay completion limitations.
+
       child(:source, %Membrane.MOQX.Source{
         endpoint: "moql://cdn.moq.dev:443",
         protocol: :moq_lite_05,

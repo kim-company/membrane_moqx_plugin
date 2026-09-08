@@ -10,8 +10,21 @@ defmodule Membrane.MOQX.CatalogSource do
   `catalog` for draft-16 and `.catalog` for Cloudflare draft-14. Draft-16
   inline CMSF initialization is preserved in the offered stream format;
   Cloudflare `initTrack` values retain their separate subscription path.
-  MoQ Lite 05 is catalog-free and must use `Membrane.MOQX.Source` with an
-  exact track instead.
+  This is a CMSF catalog consumer, not a generic relay track enumerator.
+
+  ## MoQ Lite limitation
+
+  This implementation rejects `:moq_lite_05` at initialization, including when
+  a catalog-name override is supplied. It has no Lite media-catalog profile;
+  this does not mean Lite forbids catalogs. HANG defines an application-level
+  `catalog.json` with media/decoder metadata, which this module does not parse.
+  Changing only the catalog track name would not implement that schema or its
+  media conventions.
+
+  Use `Membrane.MOQX.Source` for a known Lite track and supply its stream format.
+  It can receive catalog bytes as opaque payload, but does not interpret those
+  bytes or discover media tracks. HANG discovery and player interoperability
+  require additional implementation and verification, not a protocol switch.
   """
 
   use Membrane.Bin

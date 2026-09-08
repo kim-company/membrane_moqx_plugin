@@ -1,5 +1,16 @@
 defmodule Membrane.MOQX.TrackAdapter.CMAF do
-  @moduledoc "Adapts `Membrane.CMAF.Track` to and from the canonical MOQX pad contract."
+  @moduledoc """
+  Adapts `Membrane.CMAF.Track` to and from the canonical MOQX pad contract.
+
+  Supported codec metadata is H.264 (`avc1`) and AAC (`mp4a`). Initialization
+  bytes and codec selection metadata become `Membrane.MOQX.Track` fields;
+  chunk boundary metadata maps to `Membrane.MOQX.Unit` group boundaries.
+  Payload bytes are not encoded, decoded, muxed or demuxed by this adapter.
+
+  This is a CMAF boundary adapter, not a HANG media/catalog implementation or
+  browser-player certification. Compose the required muxer/demuxer separately
+  and verify interoperability with the chosen relay and player.
+  """
 
   @behaviour Membrane.MOQX.TrackAdapter
 
