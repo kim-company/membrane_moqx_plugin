@@ -19,6 +19,149 @@ defmodule Membrane.MOQX.CatalogSourceTest do
 
   require Pad
 
+  test "reports rejected HANG catalog subscription and removes the failed catalog child" do
+    alias Membrane.MOQX.{Sink, TestLiteBridge}
+    relay = TestLiteBridge.start(reject_track: "catalog.json")
+    namespace = ["room", "rejected.hang"]
+
+    publisher =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:publisher, %Sink{
+            endpoint: relay.publisher_endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: relay.transport
+          })
+      )
+
+    assert_pipeline_notified(publisher, :publisher, {:publication_ready, ^namespace})
+
+    catalog = %CatalogSource{
+      endpoint: relay.subscriber_endpoint,
+      protocol: :moq_lite_05,
+      profile: :hang,
+      namespace: namespace,
+      transport: relay.transport
+    }
+
+    spec = {child(:catalog, catalog), group: :catalog_reader, crash_group_mode: :temporary}
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:catalog_failed,
+       %MOQX.ProtocolError{protocol: :moq_lite_05, operation: :subscribe, code: 0x10}}
+    )
+
+    assert_child_terminated(pipeline, :catalog)
+    assert Process.alive?(pipeline)
+    Testing.Pipeline.terminate(pipeline)
+    Testing.Pipeline.terminate(publisher)
+    assert :ok = TestLiteBridge.stop(relay)
+  end
+
+  test "reports HANG connection loss and permits a fresh catalog child in the same pipeline" do
+    alias Membrane.MOQX.{Sink, TestLiteBridge}
+    pipeline = Testing.Pipeline.start_link_supervised!(spec: [])
+
+    for generation <- 1..2 do
+      relay = TestLiteBridge.start()
+      namespace = ["room", "empty-#{generation}.hang"]
+
+      publisher =
+        Testing.Pipeline.start_link_supervised!(
+          spec:
+            child(:publisher, %Sink{
+              endpoint: relay.publisher_endpoint,
+              protocol: :moq_lite_05,
+              profile: :hang,
+              namespace: namespace,
+              transport: relay.transport
+            })
+        )
+
+      assert_pipeline_notified(publisher, :publisher, {:publication_ready, ^namespace})
+
+      catalog = %CatalogSource{
+        endpoint: relay.subscriber_endpoint,
+        protocol: :moq_lite_05,
+        profile: :hang,
+        namespace: namespace,
+        transport: relay.transport
+      }
+
+      spec = {child(:catalog, catalog), group: :catalog_reader, crash_group_mode: :temporary}
+      Testing.Pipeline.execute_actions(pipeline, spec: spec)
+      assert_pipeline_notified(pipeline, :catalog, :catalog_ready)
+      refute_pipeline_notified(pipeline, :catalog, {:track_available, _offer}, 100)
+
+      :ok = TestLiteBridge.disconnect_subscriber(relay, 99)
+      assert_pipeline_notified(pipeline, :catalog, {:connection_closed, %{error_code: 99}})
+      assert_child_terminated(pipeline, :catalog)
+      assert Process.alive?(pipeline)
+      Testing.Pipeline.terminate(publisher)
+      assert :ok = TestLiteBridge.stop(relay)
+    end
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+  end
+
+  test "keeps valid HANG offers through malformed snapshots and resumes catalog updates" do
+    alias Membrane.MOQX.TestLite05Publisher
+    namespace = ["room", "recover.hang"]
+    ref = %MOQX.TrackRef{namespace: namespace, track: "catalog.json"}
+
+    valid =
+      ~s({"audio":{"renditions":{"audio":{"codec":"opus","sampleRate":48000,"numberOfChannels":2}}}})
+
+    publisher =
+      TestLite05Publisher.start(ref, 1_000_000, [
+        [{0, valid}],
+        [{0, "invalid JSON"}],
+        [{0, valid}],
+        [{0, "{}"}]
+      ])
+
+    on_exit(fn ->
+      if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
+    end)
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:catalog, %CatalogSource{
+            endpoint: publisher.endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: TestLite05Publisher.transport(publisher)
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :catalog, {:track_available, %TrackOffer{} = offer})
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:catalog_failed, %MOQX.Catalog.Error{reason: :invalid_json}}
+    )
+
+    # The later empty valid snapshot removes the original offer. Repeating the
+    # previous valid snapshot after the error must not emit a fresh offer.
+    assert_pipeline_notified(pipeline, :catalog, {:track_unavailable, ^offer})
+    refute_pipeline_notified(pipeline, :catalog, {:track_available, _offer}, 100)
+    refute_pipeline_notified(pipeline, :catalog, {:track_unavailable, _offer}, 100)
+    assert Process.alive?(pipeline)
+
+    TestLite05Publisher.finish_group(publisher)
+    TestLite05Publisher.finish_subscription(publisher)
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestLite05Publisher.await_shutdown(publisher)
+  end
+
   test "invalidates an old offer when its replacement codec is unsupported" do
     alias Membrane.MOQX.TestLite05Publisher
     namespace = ["room", "codec-change.hang"]

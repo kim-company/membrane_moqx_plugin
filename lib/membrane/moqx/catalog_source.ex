@@ -20,8 +20,11 @@ defmodule Membrane.MOQX.CatalogSource do
 
   Malformed snapshots emit `{:catalog_failed, error}` without discarding the
   last valid offers or terminating the pipeline. A subscription failure, in
-  contrast, terminates this catalog source. Later valid snapshots may replace
-  the offered track metadata; existing linked Sources remain pipeline-owned.
+  contrast, emits `{:catalog_failed, error}` and terminates this catalog source.
+  Connection loss emits `{:connection_closed, metadata}` before termination.
+  There is no automatic reconnect: a parent that wants recovery must isolate
+  the child in a crash group and create a replacement. Later valid snapshots
+  may replace the offered track metadata; existing linked Sources remain pipeline-owned.
   An unsupported rendition emits `{:track_ignored, name, reason}` and invalidates
   any old offer for that address with `{:track_unavailable, offer}`. Removal
   uses MOQX's resolved address, including relative cross-broadcast references.

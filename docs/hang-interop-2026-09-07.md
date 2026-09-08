@@ -143,6 +143,26 @@ the existing CA-signed server certificate with peer verification, not a TLS bypa
 The reference CLI logged producer-drop warnings at the end of its finite input;
 these runs certify media before shutdown, not reference-side graceful EOS.
 
+## Catalog failure/recovery addendum — 2026-09-08
+
+Public-pipeline regressions using the in-memory Lite transport now verify:
+
+- A rejected HANG catalog subscription reports the typed MOQX subscription
+  error, terminates the catalog child, and leaves its crash-group-isolated
+  parent pipeline alive.
+- Connection loss reports its close reason and terminates the catalog child.
+  The same parent pipeline can then create a fresh catalog child against a new
+  endpoint. This is parent-managed replacement, not transparent reconnection.
+- Malformed JSON reports a catalog error without dropping valid offers. A
+  subsequent identical valid snapshot introduces no duplicate offer events,
+  and a later empty snapshot removes the original offer.
+
+The catalog suite passed three consecutive runs (13 tests each). The full
+suite passed 93 tests with eight opt-in integrations excluded (seed 107537),
+and strict Credo found no issues. These regressions required fixture capabilities
+for subscription rejection and connection close, but no production behavior fix.
+They do not certify every linked-media failure or same-endpoint recovery path.
+
 ## Still unverified or incomplete
 
 - Reverse legacy Opus/H.264 receive/decode remains unverified; reverse CMAF is

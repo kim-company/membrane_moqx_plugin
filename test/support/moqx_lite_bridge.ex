@@ -8,12 +8,12 @@ defmodule Membrane.MOQX.TestLiteBridge do
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
 
-  def start do
+  def start(options \\ []) do
     {:ok, network} = Support.start_network()
     parent = self()
-    upstream = Task.async(fn -> listen(parent, network, :upstream, nil) end)
+    upstream = Task.async(fn -> listen(parent, network, :upstream, nil, options) end)
     publisher_endpoint = endpoint(upstream)
-    downstream = Task.async(fn -> listen(parent, network, :downstream, upstream.pid) end)
+    downstream = Task.async(fn -> listen(parent, network, :downstream, upstream.pid, []) end)
 
     %{
       upstream: upstream,
@@ -33,6 +33,11 @@ defmodule Membrane.MOQX.TestLiteBridge do
     :ok
   end
 
+  def disconnect_subscriber(relay, code) do
+    send(relay.downstream.pid, {:disconnect, code})
+    :ok
+  end
+
   defp endpoint(task) do
     receive do
       {:bridge_listening, pid, port} when pid == task.pid -> "moql://localhost:#{port}"
@@ -41,7 +46,7 @@ defmodule Membrane.MOQX.TestLiteBridge do
     end
   end
 
-  defp listen(parent, network, role, upstream) do
+  defp listen(parent, network, role, upstream, options) do
     {:ok, ctx} = Transport.new(Support, network: network, profile: :moq_lite_05)
     {:ok, listener, ctx} = Transport.listen(ctx, 0)
     {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
@@ -58,6 +63,7 @@ defmodule Membrane.MOQX.TestLiteBridge do
       listener: listener,
       role: role,
       upstream: upstream,
+      reject_track: options[:reject_track],
       routes: %{},
       reverse: %{},
       headers: %{},
@@ -101,6 +107,19 @@ defmodule Membrane.MOQX.TestLiteBridge do
       {:error, :timeout, ctx} ->
         %{state | ctx: ctx}
     end
+  end
+
+  defp handle({:disconnect, code}, state) do
+    {:ok, ctx} = Transport.close_connection(state.ctx, state.conn, code)
+    %{state | ctx: ctx, closed?: true}
+  end
+
+  defp handle(
+         {:request, peer, key, 2, %Messages.Subscribe{track_name: name}},
+         %{reject_track: name} = state
+       ) do
+    send(peer, {:relay_event, key, :peer_aborted_sending, %{error_code: 0x10}})
+    state
   end
 
   defp handle({:request, peer, key, type, request}, state) do
