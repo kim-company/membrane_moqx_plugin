@@ -163,10 +163,51 @@ and strict Credo found no issues. These regressions required fixture capabilitie
 for subscription rejection and connection close, but no production behavior fix.
 They do not certify every linked-media failure or same-endpoint recovery path.
 
+## Reverse legacy addendum — 2026-09-08
+
+The same pinned moq-dev/moq reference commit's browser publisher consumed a
+synthetic H.264/AAC MP4 file and re-encoded H.264/Opus into HANG legacy. No camera
+or microphone was used. Chrome was **152.0.7977.76** for these new runs; this
+does not change the browser version recorded for the earlier forward tests.
+CatalogSource selected the tracks, Source received them, and the explicit
+Legacy adapter produced codec packets. Independent WebCodecs decoders then
+decoded those captured public pipeline outputs.
+
+| Path | Decoded video frames | Decoded audio frames per channel | Float audio peak | Reordered audio packets |
+|---|---:|---:|---:|---:|
+| Pinned local relay | 25 | 244800 | 0.0949336 | 0 |
+| Public cdn.moq.dev relay | 25 | 228480 | 0.1020594 | 3 |
+
+Both runs required an initial video keyframe and subsequent delta frames.
+Local decoded video timestamps advanced from 2569443 to 4169218 microseconds,
+audio from 1485564 to 6565564. Public video advanced from 2570586 to 4170406,
+audio from 1554974 to 6294974. These are independently collected track windows,
+not a claim of A/V synchronization.
+
+An initial harness run used a nonexistent reference signal; it was corrected
+to the public `out.catalog`. Another setup mistakenly requested keyframes every
+millisecond; final runs use a one-second interval and explicitly require delta
+frames. The first public attempt incorrectly asserted globally ordered arrival
+PTS. Coordinate diagnostics showed independent Opus groups arriving out of order
+(for example group 56 before 55), consistent with the Source contract. The final
+capture preserves arrival order, checks contiguous objects and ordered PTS
+within each group, and the **offline decoder** orders groups/objects, reporting
+changed packet positions. The plugin itself does not reorder or pace media.
+The pinned reference watch decoder likewise uses a container reorder budget.
+
+The durable harness is `receive_legacy.exs` plus `browser/publish.html`,
+`browser/publish.ts` and `browser/check-reverse.mjs`, with commands in the interop
+README. TLS peer verification remained enabled locally and publicly. The browser
+closes after the finite capture/decode check; this is not graceful publisher EOS,
+bounded-latency playback or loss-recovery certification. No production behavior
+change was needed. The full suite passed 93 tests with eight opt-in integrations
+excluded (seed 98383); strict Credo passed.
+
 ## Still unverified or incomplete
 
-- Reverse legacy Opus/H.264 receive/decode remains unverified; reverse CMAF is
-  verified above.
+- Reverse legacy Opus/H.264 and reverse CMAF receive/decode are verified above;
+  real-time playback ordering, synchronization and loss recovery are not
+  provided by the core Source or framing adapters.
 - Discovery initial snapshot, live add/remove/reappearance, foreign-owner
   cancellation rejection, owner-exit cancellation, and surviving-owner updates
   have public Session/transport regression coverage. Shared-Source failure,

@@ -1,4 +1,4 @@
-# HANG reference-player certification
+# HANG reference interoperability certification
 
 This is an integration harness, not an application or a codec implementation.
 It publishes synthetic media through the plugin, then measures decoded output
@@ -94,6 +94,45 @@ cannot retime a repeated MP4 fragment. The fixture splitter handles the
 32-bit boxes produced by these commands, not arbitrary MP4 inputs.
 
 ## Reverse direction: pinned reference publisher → plugin → decoder
+
+### Legacy H.264/Opus
+
+Copy `browser/publish.html` and `browser/publish.ts` into the same pinned
+reference checkout's `interop/` directory, and `browser/check-reverse.mjs` into
+the isolated Playwright tools directory. Keep the loopback Vite server running.
+Generate a synthetic file for the reference browser publisher:
+
+```sh
+ffmpeg -i "$MOQX_INTEROP_MEDIA/video.mp4" -i "$MOQX_INTEROP_MEDIA/audio.ogg" \
+  -c:v copy -c:a aac -shortest "$MOQX_INTEROP_MEDIA/reverse-input.mp4"
+```
+
+Set `MOQX_INTEROP_INPUT` to that file, `MOQX_PLUGIN_ROOT` to this checkout,
+and `MOQX_INTEROP_OUTPUT` to a fresh temporary directory. With the same relay,
+broadcast, CA and browser certificate-hash variables described above, run:
+
+```sh
+node check-reverse.mjs
+```
+
+The reference publisher reads only this file (no device permissions), encodes
+H.264 with one-second keyframe intervals and Opus, and publishes HANG legacy.
+The check launches `receive_legacy.exs`: CatalogSource selects both tracks,
+the explicit Legacy adapter unwraps their frames, and public Testing.Sink
+outputs are captured as `legacy.json`. This artifact contains synthetic media
+only. A separate WebCodecs decoder consumes those outputs and requires at least
+20 decoded video frames, initial-keyframe/later-delta coverage, 48000 decoded
+audio frames per channel, non-silent audio and advancing decoded timestamps.
+
+QUIC groups can arrive out of order. The capture retains arrival order and
+validates contiguous object coordinates and monotonic PTS **within** each group.
+The offline decoder orders captured groups/objects and reports changed positions.
+No sorting or jitter buffer is added to the plugin. This proves media decoding,
+not bounded-latency playback, A/V synchronization, loss recovery or graceful EOS.
+The browser closes after the check; remote stream-abort warnings during teardown
+are not interpreted as a media delivery guarantee.
+
+### CMAF H.264/AAC
 
 Run the pinned `moq` CLI's `import fmp4` with a live FFmpeg fragmented-MP4 input.
 For example (add `--client-tls-root` for a local CA-signed relay):

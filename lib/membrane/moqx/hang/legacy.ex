@@ -15,6 +15,8 @@ defmodule Membrane.MOQX.Hang.Legacy do
   Decoding restores `keyframe?` from the received object index (zero starts a
   group), or from group boundaries when coordinates are absent. Received groups
   may interleave; the flag does not imply that this adapter reorders playback.
+  A decoder/player consuming multiple groups must provide its own ordering and
+  playback policy; global arrival-order PTS is not guaranteed by this filter.
 
   A decoded empty codec payload emits `Membrane.MOQX.Event.MediaEnd`, not EOS.
   Flush packets may follow that exclusive media endpoint. Downstream decoders
