@@ -7,6 +7,64 @@ defmodule Membrane.MOQX.HangLegacyTest do
   alias Membrane.MOQX.{Track, Unit}
   alias Membrane.Testing
 
+  test "empty group resets fallback H264 framing and preserves a backward epoch" do
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:source, %Membrane.MOQX.TestControlledSource{
+            stream_format: %Track{
+              packaging: "hang/legacy",
+              initialization: nil,
+              selection_params: %{"codec" => "avc1.42001e"}
+            }
+          })
+          |> child(:decode, %Legacy{direction: :decode})
+          |> child(:sink, Testing.Sink)
+      )
+
+    assert_sink_stream_format(pipeline, :sink, %Track{packaging: "h264"})
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :source,
+      {:publish,
+       [
+         %Buffer{payload: <<20, "before">>, metadata: %{moqx: %Unit{group_end?: false}}}
+       ]}
+    )
+
+    assert_sink_buffer(pipeline, :sink, %Buffer{
+      payload: "before",
+      pts: 20_000,
+      metadata: %{keyframe?: true}
+    })
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :source,
+      {:event, %Membrane.MOQX.Event.EmptyGroup{group_id: 8}}
+    )
+
+    assert_sink_event(pipeline, :sink, %Membrane.MOQX.Event.EmptyGroup{group_id: 8})
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :source,
+      {:publish,
+       [
+         %Buffer{payload: <<1, "after">>, metadata: %{moqx: %Unit{group_end?: true}}}
+       ]}
+    )
+
+    assert_sink_buffer(pipeline, :sink, %Buffer{
+      payload: "after",
+      pts: 1_000,
+      metadata: %{keyframe?: true}
+    })
+
+    Testing.Pipeline.terminate(pipeline)
+  end
+
   test "uses received object coordinates for keyframes across interleaved groups" do
     format = %Track{
       packaging: "hang/legacy",

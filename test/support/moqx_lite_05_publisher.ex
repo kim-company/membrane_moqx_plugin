@@ -40,6 +40,8 @@ defmodule Membrane.MOQX.TestLite05Publisher do
 
   def finish_group(%__MODULE__{task: task}), do: send(task.pid, :finish_group)
 
+  def reset_group(%__MODULE__{task: task}), do: send(task.pid, :reset_group)
+
   def finish_subscription(%__MODULE__{task: task}), do: send(task.pid, :finish_subscription)
 
   def await_shutdown(%__MODULE__{task: task}) do
@@ -137,8 +139,7 @@ defmodule Membrane.MOQX.TestLite05Publisher do
              Codec.encode_subscribe_response(%SubscribeOk{group: 7})
            ),
          {:ok, group_stream, ctx} <- send_groups(ctx, conn, groups, 7),
-         :ok <- await_message(:finish_group, :group_finish_timeout),
-         {:ok, ctx} <- Transport.finish_sending(ctx, group_stream),
+         {:ok, ctx} <- end_group(ctx, group_stream),
          :ok <- await_message(:finish_subscription, :finish_timeout),
          {:ok, _send, ctx} <-
            Transport.send_stream(
@@ -170,6 +171,15 @@ defmodule Membrane.MOQX.TestLite05Publisher do
       ^message -> :ok
     after
       @close_timeout -> {:error, timeout_reason}
+    end
+  end
+
+  defp end_group(ctx, stream) do
+    receive do
+      :finish_group -> Transport.finish_sending(ctx, stream)
+      :reset_group -> Transport.abort_sending(ctx, stream, 0)
+    after
+      @close_timeout -> {:error, :group_finish_timeout}
     end
   end
 

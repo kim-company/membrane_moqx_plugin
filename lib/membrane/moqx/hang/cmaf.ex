@@ -11,6 +11,11 @@ defmodule Membrane.MOQX.Hang.CMAF do
   `last_chunk?` maps to the canonical Unit group boundary in both directions.
   A muxer/demuxer remains a separate component. This adapter does not inspect
   MP4 boxes, certify random-access boundaries, or prove browser decoding.
+
+  `Membrane.MOQX.Event.EmptyGroup` passes through the composing filters as a
+  HANG codec-epoch boundary, including when the next chunk's PTS moves backward.
+  This stateless adapter does not rewrite MP4 decode times or reset a demuxer
+  or decoder; those downstream components own epoch handling.
   """
   @behaviour Membrane.MOQX.TrackAdapter
   alias Membrane.MOQX.TrackAdapter.CMAF

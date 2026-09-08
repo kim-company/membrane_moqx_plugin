@@ -8,6 +8,63 @@ defmodule Membrane.MOQX.HangCMAFTest do
   alias Membrane.MOQX.TrackAdapter.{FromTrack, ToTrack}
   alias Membrane.Testing
 
+  test "CMAF composition preserves empty-group epochs without rewriting chunks or timestamps" do
+    format = %Membrane.CMAF.Track{
+      content_type: :audio,
+      header: "init",
+      codecs: %{mp4a: %{aot_id: "2", frequency: 48_000, channels: 2}}
+    }
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:source, %Membrane.MOQX.TestControlledSource{stream_format: format})
+          |> child(:encode, %ToTrack{adapter: CMAF})
+          |> child(:decode, %FromTrack{adapter: CMAF})
+          |> child(:sink, Testing.Sink)
+      )
+
+    assert_sink_stream_format(pipeline, :sink, ^format)
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :source,
+      {:publish,
+       [
+         %Buffer{payload: "old-moof-mdat", pts: 50_000, metadata: %{last_chunk?: true}}
+       ]}
+    )
+
+    assert_sink_buffer(pipeline, :sink, %Buffer{payload: "old-moof-mdat", pts: 50_000})
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :source,
+      {:event, %Membrane.MOQX.Event.EmptyGroup{group_id: 1}}
+    )
+
+    assert_sink_event(pipeline, :sink, %Membrane.MOQX.Event.EmptyGroup{group_id: 1})
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :source,
+      {:publish,
+       [
+         %Buffer{payload: "new-moof-mdat", pts: 1_000, metadata: %{last_chunk?: true}}
+       ]}
+    )
+
+    assert_sink_buffer(pipeline, :sink, %Buffer{
+      payload: "new-moof-mdat",
+      pts: 1_000,
+      metadata: %{last_chunk?: true}
+    })
+
+    Testing.Pipeline.notify_child(pipeline, :source, :end_of_stream)
+    assert_end_of_stream(pipeline, :sink)
+    Testing.Pipeline.terminate(pipeline)
+  end
+
   test "AAC CMAF uses HANG decoder keys and restores sample rate and channels" do
     format = %Membrane.CMAF.Track{
       content_type: :audio,

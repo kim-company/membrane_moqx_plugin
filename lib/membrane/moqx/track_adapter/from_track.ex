@@ -3,7 +3,9 @@ defmodule Membrane.MOQX.TrackAdapter.FromTrack do
   Converts the canonical MOQX pad contract into a concrete Membrane format.
 
   The selected adapter may enrich concrete buffer metadata, but payload bytes
-  remain unchanged.
+  remain unchanged. Events, including `Membrane.MOQX.Event.EmptyGroup`, pass
+  through unchanged. The downstream media component owns codec-epoch resets;
+  this filter does not supply a playback engine or reorder groups.
   """
 
   use Membrane.Filter

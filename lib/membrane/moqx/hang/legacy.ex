@@ -23,17 +23,17 @@ defmodule Membrane.MOQX.Hang.Legacy do
   must apply the endpoint to decoded samples; encoded packets cannot be trimmed
   here. Encoding that event restores the empty-payload container frame.
 
-  Empty-group codec-epoch discontinuities are not supported by the current
-  Source/Sink boundary (upstream MOQX #48). They are distinct from MediaEnd:
-  a discontinuity contains no frame, while MediaEnd is a timestamped frame.
-  This adapter does not reset a decoder or make backward-PTS epochs publishable.
+  `Membrane.MOQX.Event.EmptyGroup` passes through and resets this adapter's
+  fallback group-framing state. In HANG it marks a codec-epoch boundary; a
+  subsequent epoch may have backward PTS. Downstream decoders own their reset
+  and playback policy. Unlike MediaEnd, this boundary contains no frame.
 
-  The container format is pinned by MOQX 0.9.0's HANG reference at moq-dev/moq
+  The container format is pinned by MOQX 0.10.0's HANG reference at moq-dev/moq
   `fd477082c43c3c0738fb62d077d85ea078f10045`. Both the container prefix and the
   Lite transport frame carry timing; neither is a substitute for the other.
   """
   use Membrane.Filter
-  alias Membrane.MOQX.Event.MediaEnd
+  alias Membrane.MOQX.Event.{EmptyGroup, MediaEnd}
   alias Membrane.MOQX.{Timestamp, Track, Unit}
 
   def_input_pad :input, flow_control: :auto, accepted_format: %Track{}
@@ -129,6 +129,10 @@ defmodule Membrane.MOQX.Hang.Legacy do
   end
 
   @impl true
+  def handle_event(:input, %EmptyGroup{} = event, _ctx, state) do
+    {[event: {:output, event}], %{state | group_open?: false}}
+  end
+
   def handle_event(:input, %MediaEnd{pts: pts, unit: unit}, ctx, %{direction: :encode} = state) do
     handle_buffer(
       :input,

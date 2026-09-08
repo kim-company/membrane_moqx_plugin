@@ -22,9 +22,12 @@ defmodule Membrane.MOQX.Source do
   The caller supplies the exact track and its canonical stream format. This
   element does not discover broadcasts, parse HANG catalogs, infer codecs,
   demux media, or pace playback. Use `Membrane.MOQX.CatalogSource` with an
-  explicit HANG or CMSF profile for catalog offers. Empty Lite groups currently
-  produce no buffer or discontinuity event; HANG codec-epoch discontinuities
-  are not supported.
+  explicit HANG or CMSF profile for catalog offers. Complete zero-object Lite
+  groups emit `Membrane.MOQX.Event.EmptyGroup`, preserving their group ID, not
+  a buffer or EOS. HANG interprets this event as a codec-epoch boundary;
+  downstream decoders own resetting and playback policy. Partial/reset groups
+  and zero-byte objects are not empty-group boundaries. Events follow receive
+  order; this Source does not globally reorder concurrent group streams.
 
   Output uses push flow control. Subscriber demand at a remote publisher is
   not downstream Membrane demand. Completion describes the received protocol
@@ -299,6 +302,22 @@ defmodule Membrane.MOQX.Source do
   end
 
   defp consume_event({:subscription_done, _completion}, state), do: {[], state}
+
+  defp consume_event(
+         {:subgroup_ended,
+          %MOQX.Event.SubgroupEnded{object_count: 0, outcome: :complete, end_of_group?: true} =
+            event},
+         %{protocol: protocol} = state
+       )
+       when protocol in [:moq_lite_05, MOQX.Protocol.MOQLite05] do
+    case start_object?(event, state) do
+      {true, state} ->
+        {[event: {:output, %Membrane.MOQX.Event.EmptyGroup{group_id: event.group_id}}], state}
+
+      {false, state} ->
+        {[], state}
+    end
+  end
 
   defp consume_event(
          {:subgroup_ended, event},
