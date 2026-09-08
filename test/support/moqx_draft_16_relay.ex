@@ -21,6 +21,15 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     start_mode(namespace, media_track, :reactive)
   end
 
+  def start_initialized(namespace, media_track) do
+    start_mode(namespace, media_track, :initialized)
+  end
+
+  def start_initialized_queue(namespace, media_track, repeat? \\ false) do
+    mode = if repeat?, do: :initialized_queue_twice, else: :initialized_queue
+    start_mode(namespace, media_track, mode)
+  end
+
   defp start_mode(namespace, media_track, mode) do
     {:ok, network} = Support.start_network()
     parent = self()
@@ -132,13 +141,15 @@ defmodule Membrane.MOQX.TestDraft16Relay do
   end
 
   defp serve(parent, ctx, listener, port, namespace, media_name, mode) do
-    catalog_ref = %MOQX.TrackRef{namespace: namespace, track: "catalog"}
+    initialized? = mode in [:initialized, :initialized_queue, :initialized_queue_twice]
+    catalog_name = if initialized?, do: ".catalog", else: "catalog"
+    catalog_ref = %MOQX.TrackRef{namespace: namespace, track: catalog_name}
     media_ref = %MOQX.TrackRef{namespace: namespace, track: media_name}
 
     with {:ok, conn, ctx} <- Transport.accept(ctx, listener, [], @timeout),
          {:ok, conn, ctx} <- Transport.handshake(ctx, conn, @timeout),
          {:ok, control, ctx} <- Transport.accept_stream(ctx, conn, [], @timeout),
-         {:ok, ctx} <- setup(ctx, control, port),
+         {:ok, ctx} <- setup(ctx, control, port, if(initialized?, do: 16, else: 4)),
          {:ok, ctx} <- accept_publication(ctx, control, namespace),
          {:ok, ctx} <- ready_track(parent, ctx, control, 2, catalog_ref, 0) do
       serve_mode(parent, ctx, conn, control, media_ref, mode)
@@ -148,6 +159,34 @@ defmodule Membrane.MOQX.TestDraft16Relay do
   defp serve_mode(parent, ctx, conn, control, media_ref, {:capture, delivery}) do
     with {:ok, ctx} <- ready_track(parent, ctx, control, 4, media_ref, 1) do
       capture_publication(parent, ctx, conn, delivery)
+    end
+  end
+
+  defp serve_mode(parent, ctx, conn, control, media_ref, mode)
+       when mode in [:initialized, :initialized_queue, :initialized_queue_twice] do
+    init_ref = %{media_ref | track: media_ref.track <> ".init"}
+
+    with {:ok, ctx} <- ready_track(parent, ctx, control, 4, init_ref, 1),
+         {:ok, initialization, ctx} <- receive_subgroup(ctx, conn),
+         {:ok, ctx} <- ready_track(parent, ctx, control, 6, media_ref, 2),
+         {:ok, catalog, ctx} <- receive_subgroup(ctx, conn) do
+      send(
+        parent,
+        {:draft16_capture, self(), %{initialization: initialization, catalog: catalog}}
+      )
+
+      with {:ok, ctx} <-
+             ready_track(parent, ctx, control, 8, %{init_ref | track: init_ref.track <> ".1"}, 3),
+           {:ok, next_initialization, ctx} <- receive_subgroup(ctx, conn),
+           {:ok, next_catalog, ctx} <- receive_subgroup(ctx, conn) do
+        send(
+          parent,
+          {:draft16_capture, self(),
+           %{initialization: next_initialization, catalog: next_catalog}}
+        )
+
+        finish_initialized(parent, ctx, conn, control, init_ref, mode)
+      end
     end
   end
 
@@ -161,9 +200,35 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     controlled_subscription(ctx, conn, control, media_ref, 1)
   end
 
+  defp finish_initialized(_parent, ctx, conn, _control, _ref, :initialized),
+    do: await_stop(ctx, conn)
+
+  defp finish_initialized(parent, ctx, conn, control, ref, mode) do
+    {prefix, count, ctx} = queue_prefix(parent, ctx, conn, control, ref, mode)
+
+    {objects, ctx} =
+      Enum.map_reduce(1..count, ctx, fn _, ctx ->
+        {:ok, object, ctx} = receive_subgroup(ctx, conn)
+        {object, ctx}
+      end)
+
+    send(parent, {:draft16_capture, self(), prefix ++ objects})
+    await_stop(ctx, conn)
+  end
+
+  defp queue_prefix(_parent, ctx, _conn, _control, _ref, :initialized_queue),
+    do: {[], 5, ctx}
+
+  defp queue_prefix(parent, ctx, conn, control, ref, :initialized_queue_twice) do
+    {:ok, media, ctx} = receive_subgroup(ctx, conn)
+    {:ok, ctx} = ready_track(parent, ctx, control, 10, %{ref | track: ref.track <> ".2"}, 4)
+    {:ok, initialization, ctx} = receive_subgroup(ctx, conn)
+    {[media, initialization], 4, ctx}
+  end
+
   defp capture_publication(parent, ctx, conn, delivery) do
-    with {:ok, catalog, ctx} <- receive_subgroup(ctx, conn),
-         {:ok, media, ctx} <- receive_media(ctx, conn, delivery),
+    with {:ok, catalog, datagrams, ctx} <- receive_subgroup_with_datagrams(ctx, conn),
+         {:ok, media, ctx} <- receive_media(ctx, conn, delivery, datagrams),
          {:ok, refresh, ctx} <- receive_subgroup(ctx, conn) do
       send(parent, {
         :draft16_capture,
@@ -174,6 +239,15 @@ defmodule Membrane.MOQX.TestDraft16Relay do
       await_stop(ctx, conn)
     end
   end
+
+  defp receive_media(ctx, _conn, :datagram, [data | _rest]) do
+    case Codec.decode_datagram(data) do
+      {:ok, object} -> {:ok, object, ctx}
+      {:error, reason} -> {:error, reason, ctx}
+    end
+  end
+
+  defp receive_media(ctx, conn, delivery, []), do: receive_media(ctx, conn, delivery)
 
   defp controlled_subscription(ctx, conn, control, media_ref, track_alias) do
     receive do
@@ -221,12 +295,12 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     end
   end
 
-  defp setup(ctx, control, port) do
+  defp setup(ctx, control, port, max_request_id) do
     expected = Codec.client_setup(URI.parse("moqt://localhost:#{port}"))
 
     with {:ok, ^expected, ctx} <- Transport.recv_stream(ctx, control, byte_size(expected)),
          {:ok, _send, ctx} <-
-           Transport.send_stream(ctx, control, <<0x21, 0, 3, 1, 2, 4>>) do
+           Transport.send_stream(ctx, control, <<0x21, 0, 3, 1, 2, max_request_id>>) do
       {:ok, ctx}
     end
   end
@@ -284,20 +358,33 @@ defmodule Membrane.MOQX.TestDraft16Relay do
   end
 
   defp receive_subgroup(ctx, conn) do
+    with {:ok, object, _datagrams, ctx} <- receive_subgroup_with_datagrams(ctx, conn),
+         do: {:ok, object, ctx}
+  end
+
+  defp receive_subgroup_with_datagrams(ctx, conn) do
     with {:ok, stream, ctx} <-
            Transport.accept_stream(ctx, conn, [active: true], @timeout),
          {:ok, ctx} <- Transport.set_active(ctx, stream, true),
-         {:ok, bytes, ctx} <- receive_stream_data(ctx, stream),
+         {:ok, bytes, datagrams, ctx} <- receive_stream_data(ctx, stream, []),
          {:ok, _decoder, [object]} <- SubgroupDecoder.push(%SubgroupDecoder{}, bytes) do
-      {:ok, object, ctx}
+      {:ok, object, datagrams, ctx}
     end
   end
 
-  defp receive_stream_data(ctx, stream) do
+  defp receive_stream_data(ctx, stream, datagrams) do
     case Transport.receive_event(ctx, @timeout) do
-      {:ok, {:stream_data, ^stream, data, _metadata}, ctx} -> {:ok, data, ctx}
-      {:ok, _event, ctx} -> receive_stream_data(ctx, stream)
-      other -> other
+      {:ok, {:stream_data, ^stream, data, _metadata}, ctx} ->
+        {:ok, data, Enum.reverse(datagrams), ctx}
+
+      {:ok, {:datagram, _conn, data, _metadata}, ctx} ->
+        receive_stream_data(ctx, stream, [data | datagrams])
+
+      {:ok, _event, ctx} ->
+        receive_stream_data(ctx, stream, datagrams)
+
+      other ->
+        other
     end
   end
 

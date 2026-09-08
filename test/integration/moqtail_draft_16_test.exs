@@ -23,6 +23,7 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
           child(:source, %CatalogSource{
             endpoint: endpoint,
             protocol: :draft_16,
+            profile: :moqtail_cmsf,
             namespace: namespace,
             timeout: @timeout
           })
@@ -86,6 +87,7 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
           child(:sink, %Sink{
             endpoint: endpoint,
             protocol: :draft_16,
+            profile: :moqtail_cmsf,
             namespace: namespace,
             timeout: @timeout,
             catalog_refresh_interval: 500,

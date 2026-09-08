@@ -7,33 +7,94 @@ defmodule Membrane.MOQX.Sink do
   track and unit contract before this element; the Sink owns MOQ coordinates,
   catalog state, and the MOQX client.
 
+  `profile` is selected independently of the wire protocol. The default
+  `:none` publishes raw tracks without a catalog. Select `:cloudflare_cmsf`,
+  `:moqtail_cmsf`, or `:hang` explicitly for catalog publication. HANG requires
+  Lite05 and publishes retained `catalog.json` snapshots through MOQX's catalog
+  API. A new HANG publication starts with an empty catalog; dynamic media tracks
+  replace that snapshot. Media packaging must match the selected profile.
+  `catalog_compression: :deflate` selects HANG `catalog.json.z` and actual
+  DEFLATE encoding through MOQX. The default `:none` uses `catalog.json`.
+  A Sink publishes one selected encoding, without dual-format publication or
+  fallback. CMSF/raw DEFLATE and mismatched conventional names are rejected.
+  Compressed HANG must use `catalog.json.z`: MOQX selects decoding by that name.
+  Use `Membrane.MOQX.Hang.Legacy` for Opus/H.264 legacy framing, or
+  `Membrane.MOQX.Hang.CMAF` with `TrackAdapter.ToTrack` for H.264/AAC CMAF.
+  These are explicit adapters; this Sink does not encode media or add framing.
+  For HANG over Lite, media EOS withdraws that track from the catalog, not the
+  broadcast itself. Even after its last media track ends, the publication
+  remains discoverable until the Sink closes. Catalog track-offer withdrawal
+  and Session broadcast withdrawal are distinct notifications/lifecycles.
+
+  With `:none`, canonical initialization remains caller-owned metadata; no
+  catalog or initialization track is synthesized. Initialization is profile-owned:
+  Moqtail CMSF uses inline `initData`, Cloudflare CMSF uses a separate retained
+  initialization track, and HANG uses its decoder/container metadata. Transport
+  selection controls delivery mechanics, including Lite timestamps and completed
+  groups. On draft-16, separate initialization waits for relay track readiness;
+  media readiness and catalog advertisement wait for both tracks. Format updates
+  publish a new initialization generation before advertising that generation.
+  While readiness is pending, subsequent stream formats, buffers and EOS are
+  queued together in input order. Replay publishes media under its own format
+  generation, pauses again if another format needs initialization readiness,
+  and applies EOS only after all earlier events. Identical consecutive formats
+  do not create a new generation. This is an in-memory queue, not backpressure;
+  upstream flow control remains the application's responsibility.
+  MOQX 0.10.0 isolates late initialization-subscription replies and group tails;
+  no arbitrary cancellation delay is added here.
+
   With `inbound_subscriptions: :controlled`, typed MOQX requests are surfaced
   as `{:subscription_requested, request}` parent notifications. The parent
   explicitly accepts or rejects them through child notifications. Approval may
   precede dynamic pad creation; the Sink waits until the named track is
   registered before accepting it through MOQX.
+  Lite relays can request metadata before subscription admission. Opt into
+  `missing_track_metadata: :controlled` to receive
+  `{:track_metadata_requested, request}`. Adding the named dynamic pad and its
+  stream format registers the track and answers pending metadata requests;
+  it does not authorize controlled subscriptions. Reject a metadata request with
+  `{:reject_track_request, request, %MOQX.SubscriptionRejection{}}`.
+  `{:track_metadata_request_done, event}` preserves MOQX's typed request and
+  terminal outcome, including reply failure. A rejected/stale decision reports
+  `{:track_metadata_decision_failed, request, reason}` without killing the Sink.
+  Local registration remains usable even if one metadata reply fails; the
+  terminal event is transport admission, not peer delivery. Retry/provisioning
+  policy remains parent-owned. MOQX bounds pending requests with
+  `track_metadata_timeout` (default 5 seconds) and `max_pending_track_metadata`
+  (default 128). The default policy is `:reject`; controlled metadata demand is
+  Lite-only and independent of `inbound_subscriptions`.
 
   Subscriber join/leave notifications include the track's current subscriber
-  count. Optional `Membrane.MOQX.Event.TrackDemand` events carry only aggregate
+  count on this MOQX connection, not the viewer count behind a relay. A relay
+  may aggregate multiple downstream Sources into a single upstream subscription.
+  Optional `Membrane.MOQX.Event.TrackDemand` events carry only aggregate
   zero/nonzero demand transitions upstream on an established media pad. Pad
   removal terminates that event edge and does not synthesize a final inactive
   event on the detached pad; the parent still observes subscriber departure.
   A parent can finish one accepted subscriber without withdrawing the track by
   sending `{:finish_subscription, request_handle, options}`.
 
-  Standard draft-16 publication waits for namespace and per-track readiness,
-  emits Moqtail-compatible inline-initialization catalogs, supports subgroup or
-  datagram delivery per pad, and refreshes its retained catalog for late
-  discovery. Cloudflare draft-14 preserves `.catalog`, separate initialization
-  tracks, and subgroup-only publication. Protocol selection is always explicit.
+  Draft-16 publication waits for namespace and per-track readiness and supports
+  subgroup or datagram delivery per pad. Cloudflare draft-14 uses subgroup-only
+  publication. These transport choices do not select a catalog profile:
+  `:moqtail_cmsf` embeds initialization in its catalog, while `:cloudflare_cmsf`
+  uses separate initialization tracks and defaults to `.catalog`. Catalog
+  profiles refresh their retained catalog for late discovery; `:none` creates
+  neither catalog nor initialization tracks. Protocol and profile selection
+  remain explicit, including accepted cross-protocol profile compositions.
 
-  MoQ Lite draft-05 publication here uses exact tracks without an automatically
-  generated catalog. This is a plugin convention, not a ban on Lite catalogs.
+  Raw MoQ Lite draft-05 publication uses exact tracks without an automatically
+  generated catalog. Select `profile: :hang` for HANG catalog publication.
   Each Lite input pad must
   provide a positive `timescale`; it may also set track-specific
   `publisher_priority`, `publisher_max_latency`, retention, and reliable
   subgroup delivery. PTS is rounded to the nearest track tick (exact halves
-  round up) and must be non-negative and non-decreasing.
+  round up) and must be non-negative and non-decreasing within an epoch.
+  `Membrane.MOQX.Event.EmptyGroup` publishes a genuine zero-object Lite group,
+  advances the Sink-owned group ID, and permits a new backward-PTS epoch.
+  Incoming event coordinates are informational, not publication coordinates.
+  The preceding group must already be complete; partial groups and non-Lite
+  protocols reject this event. It is not a zero-byte object, MediaEnd or EOS.
 
       child(:producer, producer)
       |> via_in(Pad.ref(:input, :opus),
@@ -47,8 +108,9 @@ defmodule Membrane.MOQX.Sink do
         track_demand_events: true
       })
 
-  MoQ Lite does not imply HANG payload or catalog compatibility; media framing
-  remains an application concern outside this Sink.
+  Selecting HANG catalogs does not add media framing to buffers. Supply already
+  framed media through explicit adapters; media decoding and playback remain
+  separate verification gates.
 
   Input EOS finishes the track through MOQX; it does not wait for an application
   acknowledgement that every subscriber received the final buffer. Observed
@@ -61,6 +123,7 @@ defmodule Membrane.MOQX.Sink do
   use Membrane.Sink
 
   alias Membrane.MOQX.{ProtocolConventions, Timestamp, Track, Unit}
+  alias MOQX.Protocol.Resolver
 
   def_input_pad :input,
     availability: :on_request,
@@ -78,12 +141,14 @@ defmodule Membrane.MOQX.Sink do
 
   def_options endpoint: [spec: binary() | URI.t(), required: true],
               protocol: [spec: atom() | module(), required: true],
+              profile: [spec: MOQX.Profile.t(), default: :none],
               namespace: [spec: [binary()], required: true],
               authorization: [spec: MOQX.Secret.t() | nil, default: nil],
               timeout: [spec: pos_integer(), default: 5_000],
               connect_options: [spec: keyword(), default: []],
               transport: [spec: term(), default: nil],
               catalog_track_name: [spec: binary() | nil, default: nil],
+              catalog_compression: [spec: :none | :deflate, default: :none],
               publisher_priority: [spec: 0..255, default: 127],
               catalog_refresh_interval: [spec: pos_integer() | nil, default: 1_000],
               inbound_subscriptions: [
@@ -92,6 +157,9 @@ defmodule Membrane.MOQX.Sink do
               ],
               subscription_decision_timeout: [spec: non_neg_integer(), default: 5_000],
               max_pending_subscriptions: [spec: pos_integer(), default: 128],
+              missing_track_metadata: [spec: :reject | :controlled, default: :reject],
+              track_metadata_timeout: [spec: non_neg_integer(), default: 5_000],
+              max_pending_track_metadata: [spec: pos_integer(), default: 128],
               infrastructure_subscriptions: [
                 spec: :automatic | :controlled,
                 default: :automatic
@@ -100,12 +168,20 @@ defmodule Membrane.MOQX.Sink do
 
   @impl true
   def handle_init(_ctx, options) do
+    {:ok, protocol} = Resolver.fetch(options.protocol)
+    :ok = MOQX.Profile.validate(options.profile, protocol.id())
+
+    catalog_name =
+      ProtocolConventions.profile_catalog_track_name(
+        options.profile,
+        options.catalog_compression,
+        options.catalog_track_name
+      )
+
     state =
       options
       |> Map.from_struct()
-      |> Map.update!(:catalog_track_name, fn override ->
-        ProtocolConventions.catalog_track_name(options.protocol, override)
-      end)
+      |> Map.put(:catalog_track_name, catalog_name)
       |> Map.merge(%{
         client: nil,
         publication: nil,
@@ -147,9 +223,10 @@ defmodule Membrane.MOQX.Sink do
           init_track_name: nil,
           media_track: nil,
           ready?: false,
+          media_ready?: false,
+          init_ready?: true,
           pending_notification: nil,
-          queued_buffers: [],
-          eos_pending?: false,
+          queued_events: :queue.new(),
           generation: 0,
           group_id: 0,
           object_id: 0,
@@ -217,7 +294,7 @@ defmodule Membrane.MOQX.Sink do
         {[], state}
 
       not pad_state.ready? ->
-        {[], put_in(state, [:pads, pad, :eos_pending?], true)}
+        queue_pad_event(pad, :end_of_stream, state)
 
       true ->
         case publish_end_of_track(state, pad_state) do
@@ -239,6 +316,9 @@ defmodule Membrane.MOQX.Sink do
         cond do
           is_nil(pad_state.track) ->
             prepare_initial_track(pad, stream_format, state)
+
+          not pad_state.ready? ->
+            queue_pad_event(pad, {:stream_format, stream_format}, state)
 
           stream_format == pad_state.track ->
             {[], state}
@@ -311,10 +391,10 @@ defmodule Membrane.MOQX.Sink do
             init_track,
             init_name,
             media_track,
-            ready?
+            {ready?, initialization_ready?(state, init_track)}
           )
 
-        if ready? do
+        if pad_state.ready? do
           publish_prepared_track(pad, pad_state, pad_state.pending_notification, state)
         else
           {[], put_in(state, [:pads, pad], pad_state)}
@@ -347,10 +427,14 @@ defmodule Membrane.MOQX.Sink do
             init_track,
             init_name,
             media_track,
-            true
+            {true, initialization_ready?(state, init_track)}
           )
 
-        publish_prepared_track(pad, pad_state, pad_state.pending_notification, state)
+        if pad_state.ready? do
+          publish_prepared_track(pad, pad_state, pad_state.pending_notification, state)
+        else
+          {[], put_in(state, [:pads, pad], pad_state)}
+        end
 
       {:error, reason} ->
         raise "failed to accept reactive MOQX track: #{inspect(reason)}"
@@ -364,7 +448,7 @@ defmodule Membrane.MOQX.Sink do
          init_track,
          init_name,
          media_track,
-         ready?
+         {ready?, init_ready?}
        ) do
     %{
       pad_state
@@ -372,7 +456,9 @@ defmodule Membrane.MOQX.Sink do
         init_track: init_track,
         init_track_name: init_name,
         media_track: media_track,
-        ready?: ready?,
+        ready?: ready? and init_ready?,
+        media_ready?: ready?,
+        init_ready?: init_ready?,
         pending_notification: {:track_ready, pad, pad_state.options.track_name}
     }
   end
@@ -408,6 +494,8 @@ defmodule Membrane.MOQX.Sink do
             init_track: init_track,
             init_track_name: init_name,
             generation: generation,
+            init_ready?: initialization_ready?(state, init_track),
+            ready?: pad_state.media_ready? and initialization_ready?(state, init_track),
             pending_notification: {:track_updated, pad, pad_state.options.track_name, generation}
         }
 
@@ -453,7 +541,7 @@ defmodule Membrane.MOQX.Sink do
             state
           )
 
-        {[notify_parent: notification] ++ subscription_actions, state}
+        flush_ready_pad(pad, [notify_parent: notification] ++ subscription_actions, state)
 
       {:error, reason} ->
         raise "failed to publish MOQX catalog: #{inspect(reason)}"
@@ -464,22 +552,27 @@ defmodule Membrane.MOQX.Sink do
     {:ok, nil, nil}
   end
 
-  defp prepare_initialization(state, _name, _track)
-       when state.protocol in [
-              :draft_16,
-              MOQX.Protocol.Draft16,
-              :moq_lite_05,
-              MOQX.Protocol.MOQLite05
-            ] do
+  defp prepare_initialization(%{profile: profile}, _name, _track)
+       when profile != :cloudflare_cmsf do
     {:ok, nil, nil}
   end
 
   defp prepare_initialization(state, name, track) do
-    with {:ok, init_track} <-
-           MOQX.add_track(state.client, state.publication, name, retention: :latest),
-         :ok <- publish_initialization(state, init_track, track) do
+    options = [retention: :latest, timescale: 1_000_000]
+
+    with {:ok, init_track} <- MOQX.add_track(state.client, state.publication, name, options),
+         :ok <- maybe_publish_initialization(state, init_track, track) do
       {:ok, init_track, name}
     end
+  end
+
+  defp initialization_ready?(state, init_track),
+    do: is_nil(init_track) or not ProtocolConventions.draft_16?(state.protocol)
+
+  defp maybe_publish_initialization(state, init_track, track) do
+    if initialization_ready?(state, init_track),
+      do: publish_initialization(state, init_track, track),
+      else: :ok
   end
 
   @impl true
@@ -489,10 +582,49 @@ defmodule Membrane.MOQX.Sink do
     if pad_state.ready? do
       publish_buffer(pad, buffer, pad_state, state)
     else
-      pad_state = update_in(pad_state.queued_buffers, &(&1 ++ [buffer]))
-      {[], put_in(state, [:pads, pad], pad_state)}
+      queue_pad_event(pad, {:buffer, buffer}, state)
     end
   end
+
+  defp queue_pad_event(pad, event, state) do
+    {[], update_in(state, [:pads, pad, :queued_events], &:queue.in(event, &1))}
+  end
+
+  @impl true
+  def handle_event(pad, %Membrane.MOQX.Event.EmptyGroup{} = event, _ctx, state) do
+    unless ProtocolConventions.moq_lite_05?(state.protocol) do
+      raise ArgumentError, "empty groups require MoQ Lite 05"
+    end
+
+    pad_state = Map.fetch!(state.pads, pad)
+
+    cond do
+      pad_state.ended? ->
+        raise ArgumentError, "cannot publish an empty group after track EOS"
+
+      not pad_state.ready? ->
+        queue_pad_event(pad, {:event, event}, state)
+
+      pad_state.object_id != 0 ->
+        raise ArgumentError, "finish the current group before publishing an empty group"
+
+      true ->
+        case MOQX.publish_empty_group(state.client, pad_state.media_track, pad_state.group_id) do
+          :ok ->
+            {[],
+             put_in(state, [:pads, pad], %{
+               pad_state
+               | group_id: pad_state.group_id + 1,
+                 last_pts: nil
+             })}
+
+          {:error, reason} ->
+            raise "failed to publish empty MOQX group: #{inspect(reason)}"
+        end
+    end
+  end
+
+  def handle_event(_pad, _event, _ctx, state), do: {[], state}
 
   defp publish_buffer(pad, buffer, pad_state, state) do
     with {:ok, unit} <- Unit.from_buffer(buffer),
@@ -527,6 +659,21 @@ defmodule Membrane.MOQX.Sink do
   end
 
   @impl true
+  def handle_parent_notification(
+        {:reject_track_request, %MOQX.PublicationTrackRequest{} = request,
+         %MOQX.SubscriptionRejection{} = rejection},
+        _ctx,
+        state
+      ) do
+    case MOQX.reject_track_request(state.client, request, rejection) do
+      :ok ->
+        {[], state}
+
+      {:error, reason} ->
+        {[notify_parent: {:track_metadata_decision_failed, request, reason}], state}
+    end
+  end
+
   def handle_parent_notification(
         {:accept_subscription, %MOQX.PublicationSubscriptionRequest{} = request},
         _ctx,
@@ -606,11 +753,25 @@ defmodule Membrane.MOQX.Sink do
 
   @impl true
   def handle_info(
+        {:moqx, client, %MOQX.Event.PublicationTrackRequested{request: request}},
+        _ctx,
+        %{client: client} = state
+      ),
+      do: {[notify_parent: {:track_metadata_requested, request}], state}
+
+  def handle_info(
+        {:moqx, client, %MOQX.Event.PublicationTrackRequestDone{} = event},
+        _ctx,
+        %{client: client} = state
+      ),
+      do: {[notify_parent: {:track_metadata_request_done, event}], state}
+
+  def handle_info(
         {:moqx, client, %MOQX.Event.PublicationReady{publication: publication}},
         _ctx,
         %{client: client, publication: publication} = state
       ) do
-    if ProtocolConventions.moq_lite_05?(state.protocol) do
+    if is_nil(state.catalog_track_name) do
       publication_became_ready(%{state | catalog_ready?: true})
     else
       register_catalog_track(client, publication, state)
@@ -738,7 +899,14 @@ defmodule Membrane.MOQX.Sink do
   def handle_info(_message, _ctx, state), do: {[], state}
 
   defp register_catalog_track(client, publication, state) do
-    options = ProtocolConventions.track_options(state.protocol, :latest, :subgroup)
+    options = [
+      profile: if(state.profile == :hang, do: :hang, else: :none),
+      compression: state.catalog_compression,
+      retention: :latest,
+      timescale: 1_000_000,
+      publisher_priority:
+        ProtocolConventions.catalog_priority(state.protocol, state.publisher_priority)
+    ]
 
     case MOQX.add_track(client, publication, state.catalog_track_name, options) do
       {:ok, catalog_track} ->
@@ -830,22 +998,30 @@ defmodule Membrane.MOQX.Sink do
         {[], state}
 
       pad ->
+        pad_state = Map.fetch!(state.pads, pad)
+
         pad_state =
-          state.pads
-          |> Map.fetch!(pad)
-          |> Map.put(:ready?, true)
+          if pad_state.init_track == track do
+            :ok = publish_initialization(state, track, pad_state.track)
+            %{pad_state | init_ready?: true}
+          else
+            %{pad_state | media_ready?: true}
+          end
+
+        pad_state = %{pad_state | ready?: pad_state.media_ready? and pad_state.init_ready?}
 
         state = put_in(state, [:pads, pad], pad_state)
 
-        {actions, state} =
+        if pad_state.ready? do
           publish_prepared_track(
             pad,
             pad_state,
             pad_state.pending_notification,
             state
           )
-
-        flush_ready_pad(pad, actions, state)
+        else
+          {[], state}
+        end
     end
   end
 
@@ -869,14 +1045,28 @@ defmodule Membrane.MOQX.Sink do
     |> put_if_present(:transport, state.transport)
   end
 
-  defp publication_options(%{inbound_subscriptions: :automatic}), do: []
-
   defp publication_options(state) do
-    [
-      inbound_subscriptions: :controlled,
-      subscription_decision_timeout: state.subscription_decision_timeout,
-      max_pending_subscriptions: state.max_pending_subscriptions
-    ]
+    admission =
+      if state.inbound_subscriptions == :controlled do
+        [
+          inbound_subscriptions: :controlled,
+          subscription_decision_timeout: state.subscription_decision_timeout,
+          max_pending_subscriptions: state.max_pending_subscriptions
+        ]
+      else
+        []
+      end
+
+    if state.missing_track_metadata == :controlled do
+      admission ++
+        [
+          missing_track_metadata: :controlled,
+          track_metadata_timeout: state.track_metadata_timeout,
+          max_pending_track_metadata: state.max_pending_track_metadata
+        ]
+    else
+      admission
+    end
   end
 
   defp put_if_present(options, _key, nil), do: options
@@ -889,6 +1079,14 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp publication_became_ready(state) do
+    state =
+      if state.profile == :hang do
+        {:ok, state} = publish_catalog(state)
+        state
+      else
+        state
+      end
+
     {subscription_actions, state} =
       accept_approved_subscriptions([state.catalog_track_name], state)
 
@@ -902,7 +1100,8 @@ defmodule Membrane.MOQX.Sink do
   defp published_track_pending?(track, state) do
     (track == state.catalog_track and not state.catalog_ready?) or
       Enum.any?(state.pads, fn {_pad, pad_state} ->
-        pad_state.media_track == track and not pad_state.ready?
+        (pad_state.media_track == track and not pad_state.media_ready?) or
+          (pad_state.init_track == track and not pad_state.init_ready?)
       end)
   end
 
@@ -912,45 +1111,44 @@ defmodule Membrane.MOQX.Sink do
 
   defp pad_for_published_track(state, track) do
     Enum.find_value(state.pads, fn {pad, pad_state} ->
-      if pad_state.media_track == track, do: pad
+      if pad_state.media_track == track or pad_state.init_track == track, do: pad
     end)
   end
 
   defp flush_ready_pad(pad, actions, state) do
     pad_state = Map.fetch!(state.pads, pad)
-    queued_buffers = pad_state.queued_buffers
-    eos_pending? = pad_state.eos_pending?
 
-    state =
-      put_in(state, [:pads, pad], %{
-        pad_state
-        | queued_buffers: [],
-          eos_pending?: false,
-          pending_notification: nil
-      })
+    case {pad_state.ready?, :queue.out(pad_state.queued_events)} do
+      {true, {{:value, event}, rest}} ->
+        state =
+          put_in(state, [:pads, pad], %{
+            pad_state
+            | queued_events: rest,
+              pending_notification: nil
+          })
 
-    {actions, state} =
-      Enum.reduce(queued_buffers, {actions, state}, fn buffer, {actions, state} ->
-        pad_state = Map.fetch!(state.pads, pad)
-        {next_actions, state} = publish_buffer(pad, buffer, pad_state, state)
-        {actions ++ next_actions, state}
-      end)
+        {next_actions, state} = replay_pad_event(pad, event, state)
+        flush_ready_pad(pad, actions ++ next_actions, state)
 
-    if eos_pending? do
-      pad_state = Map.fetch!(state.pads, pad)
+      {true, {:empty, _queue}} ->
+        {actions, put_in(state, [:pads, pad, :pending_notification], nil)}
 
-      case publish_end_of_track(state, pad_state) do
-        :ok ->
-          {eos_actions, state} = finish_track_eos(pad, pad_state, state)
-          {actions ++ eos_actions, state}
-
-        {:error, reason} ->
-          raise "failed to publish queued MOQX end-of-track: #{inspect(reason)}"
-      end
-    else
-      {actions, state}
+      _other ->
+        {actions, state}
     end
   end
+
+  defp replay_pad_event(pad, {:stream_format, format}, state),
+    do: handle_stream_format(pad, format, nil, state)
+
+  defp replay_pad_event(pad, {:buffer, buffer}, state),
+    do: handle_buffer(pad, buffer, nil, state)
+
+  defp replay_pad_event(pad, :end_of_stream, state),
+    do: handle_end_of_stream(pad, nil, state)
+
+  defp replay_pad_event(pad, {:event, event}, state),
+    do: handle_event(pad, event, nil, state)
 
   defp published_track_for_name(state, track_name) do
     if state.catalog_track && published_track_name(state.catalog_track) == track_name do
@@ -1098,13 +1296,8 @@ defmodule Membrane.MOQX.Sink do
 
   defp init_track_name(%{init_track_name: name}), do: name
 
-  defp resolved_init_track_name(_options, state)
-       when state.protocol in [
-              :draft_16,
-              MOQX.Protocol.Draft16,
-              :moq_lite_05,
-              MOQX.Protocol.MOQLite05
-            ],
+  defp resolved_init_track_name(_options, %{profile: profile})
+       when profile != :cloudflare_cmsf,
        do: nil
 
   defp resolved_init_track_name(options, _state), do: init_track_name(options)
@@ -1185,6 +1378,8 @@ defmodule Membrane.MOQX.Sink do
       group_id: 0,
       subgroup_id: 0,
       object_id: 0,
+      timestamp: if(ProtocolConventions.moq_lite_05?(state.protocol), do: 0),
+      end_of_group?: true,
       publisher_priority: state.publisher_priority,
       payload: track.initialization
     })
@@ -1208,22 +1403,98 @@ defmodule Membrane.MOQX.Sink do
   defp publish_catalog(state) when is_nil(state.catalog_track_name), do: {:ok, state}
 
   defp publish_catalog(state) do
-    payload =
-      state.protocol
-      |> ProtocolConventions.catalog(state.namespace, catalog_tracks(state))
-      |> JSON.encode!()
+    case catalog_snapshot(state) do
+      {:ok, catalog} -> publish_catalog_snapshot(catalog, state)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-    object = %MOQX.Object{
-      group_id: state.catalog_revision,
-      subgroup_id: 0,
-      object_id: 0,
-      publisher_priority:
-        ProtocolConventions.catalog_priority(state.protocol, state.publisher_priority),
-      end_of_group?: true,
-      payload: payload
-    }
+  defp catalog_snapshot(%{profile: :hang} = state) do
+    catalog_tracks(state)
+    |> Enum.reduce_while({:ok, %{}}, fn {name, _init, track}, {:ok, raw} ->
+      case hang_rendition(track) do
+        {:ok, role, rendition} ->
+          section = Map.get(raw, role, %{"renditions" => %{}})
+          section = update_in(section["renditions"], &Map.put(&1, name, rendition))
+          {:cont, {:ok, Map.put(raw, role, section)}}
 
-    case MOQX.publish_object(state.client, state.catalog_track, object) do
+        {:error, _} = error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, raw} ->
+        MOQX.Catalog.decode(JSON.encode!(raw), format: :hang, namespace: state.namespace)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp catalog_snapshot(state) do
+    convention = if state.profile == :moqtail_cmsf, do: :draft_16, else: :cloudflare_draft_14
+    format = if state.profile == :moqtail_cmsf, do: :moqtail_cmsf, else: :cloudflare
+    raw = ProtocolConventions.catalog(convention, state.namespace, catalog_tracks(state))
+    # CMSF encoding uses its raw representation; receiving codec validation is
+    # intentionally not a restriction on the plugin's open packaging contract.
+    {:ok, %MOQX.Catalog{format: format, tracks: [], raw: raw, namespace: state.namespace}}
+  end
+
+  defp hang_rendition(%Track{packaging: "hang/legacy"} = track) do
+    role = track.catalog_fields["role"]
+
+    raw =
+      track.catalog_fields
+      |> Map.delete("role")
+      |> Map.merge(track.selection_params)
+      |> Map.put("container", %{"kind" => "legacy"})
+
+    raw =
+      if is_binary(track.initialization),
+        do: Map.put(raw, "description", Base.encode16(track.initialization, case: :lower)),
+        else: raw
+
+    if role in ["audio", "video"], do: {:ok, role, raw}, else: {:error, :hang_media_role_required}
+  end
+
+  defp hang_rendition(%Track{packaging: "cmaf", initialization: init} = track)
+       when is_binary(init) do
+    role = track.catalog_fields["role"]
+
+    raw =
+      track.catalog_fields
+      |> Map.delete("role")
+      |> Map.merge(track.selection_params)
+      |> Map.put("container", %{"kind" => "cmaf", "init" => Base.encode64(init)})
+
+    if role in ["audio", "video"], do: {:ok, role, raw}, else: {:error, :hang_media_role_required}
+  end
+
+  defp hang_rendition(_track), do: {:error, :unsupported_hang_packaging}
+
+  defp publish_catalog_snapshot(catalog, state) do
+    result =
+      if state.profile == :hang do
+        MOQX.publish_catalog(state.client, state.catalog_track, catalog)
+      else
+        # MOQX's catalog publication API has no per-object priority option.
+        # CMSF draft-16 catalogs require our existing priority-zero convention.
+        with {:ok, payload} <- MOQX.Catalog.encode(catalog) do
+          MOQX.publish_object(state.client, state.catalog_track, %MOQX.Object{
+            group_id: state.catalog_revision,
+            subgroup_id: 0,
+            object_id: 0,
+            timestamp:
+              if(ProtocolConventions.moq_lite_05?(state.protocol), do: state.catalog_revision),
+            publisher_priority:
+              ProtocolConventions.catalog_priority(state.protocol, state.publisher_priority),
+            end_of_group?: true,
+            payload: payload
+          })
+        end
+      end
+
+    case result do
       :ok ->
         state = %{state | catalog_revision: state.catalog_revision + 1}
         {:ok, schedule_catalog_refresh(state)}
@@ -1236,7 +1507,7 @@ defmodule Membrane.MOQX.Sink do
   defp catalog_tracks(state) do
     state.pads
     |> Enum.filter(fn {_pad, pad_state} ->
-      not is_nil(pad_state.track) and !pad_state.ended?
+      not is_nil(pad_state.track) and pad_state.ready? and !pad_state.ended?
     end)
     |> Enum.sort_by(fn {_pad, pad_state} -> pad_state.options.track_name end)
     |> Enum.map(fn {_pad, pad_state} ->

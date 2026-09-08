@@ -40,6 +40,8 @@ defmodule Membrane.MOQX.TestLite05Publisher do
 
   def finish_group(%__MODULE__{task: task}), do: send(task.pid, :finish_group)
 
+  def reset_group(%__MODULE__{task: task}), do: send(task.pid, :reset_group)
+
   def finish_subscription(%__MODULE__{task: task}), do: send(task.pid, :finish_subscription)
 
   def await_shutdown(%__MODULE__{task: task}) do
@@ -128,27 +130,40 @@ defmodule Membrane.MOQX.TestLite05Publisher do
   end
 
   defp send_subscription(ctx, subscribe_stream, conn, frames) do
+    groups = if is_list(hd(frames)), do: frames, else: [frames]
+
     with {:ok, _send, ctx} <-
            Transport.send_stream(
              ctx,
              subscribe_stream,
              Codec.encode_subscribe_response(%SubscribeOk{group: 7})
            ),
-         {:ok, group_stream, ctx} <- Transport.open_stream(ctx, conn, direction: :unidirectional),
-         {:ok, _send, ctx} <-
-           Transport.send_stream(ctx, group_stream, group_bytes(frames)),
-         :ok <- await_message(:finish_group, :group_finish_timeout),
-         {:ok, ctx} <- Transport.finish_sending(ctx, group_stream),
+         {:ok, group_stream, ctx} <- send_groups(ctx, conn, groups, 7),
+         {:ok, ctx} <- end_group(ctx, group_stream),
          :ok <- await_message(:finish_subscription, :finish_timeout),
          {:ok, _send, ctx} <-
            Transport.send_stream(
              ctx,
              subscribe_stream,
-             Codec.encode_subscribe_response(%SubscribeEnd{group: 7}),
+             Codec.encode_subscribe_response(%SubscribeEnd{group: 7 + length(groups)}),
              finish: true
            ) do
       {:ok, ctx}
     end
+  end
+
+  defp send_groups(ctx, conn, [frames | remaining], sequence) do
+    with {:ok, stream, ctx} <- Transport.open_stream(ctx, conn, direction: :unidirectional),
+         {:ok, _send, ctx} <- Transport.send_stream(ctx, stream, group_bytes(frames, sequence)) do
+      continue_groups(ctx, conn, stream, remaining, sequence)
+    end
+  end
+
+  defp continue_groups(ctx, _conn, stream, [], _sequence), do: {:ok, stream, ctx}
+
+  defp continue_groups(ctx, conn, stream, remaining, sequence) do
+    with {:ok, ctx} <- Transport.finish_sending(ctx, stream),
+         do: send_groups(ctx, conn, remaining, sequence + 1)
   end
 
   defp await_message(message, timeout_reason) do
@@ -159,7 +174,16 @@ defmodule Membrane.MOQX.TestLite05Publisher do
     end
   end
 
-  defp group_bytes(frames) do
+  defp end_group(ctx, stream) do
+    receive do
+      :finish_group -> Transport.finish_sending(ctx, stream)
+      :reset_group -> Transport.abort_sending(ctx, stream, 0)
+    after
+      @close_timeout -> {:error, :group_finish_timeout}
+    end
+  end
+
+  defp group_bytes(frames, sequence) do
     encoded_frames =
       Enum.map(frames, fn {timestamp_delta, payload} ->
         Codec.encode_frame(%Frame{timestamp_delta: timestamp_delta, payload: payload})
@@ -167,7 +191,7 @@ defmodule Membrane.MOQX.TestLite05Publisher do
 
     IO.iodata_to_binary([
       MOQX.Codec.encode_varint(0x0),
-      Codec.encode_group(%Group{subscribe_id: 0, group_sequence: 7}),
+      Codec.encode_group(%Group{subscribe_id: 0, group_sequence: sequence}),
       encoded_frames
     ])
   end

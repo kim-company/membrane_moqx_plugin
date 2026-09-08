@@ -27,6 +27,14 @@ defmodule Membrane.MOQX.TestControlledSource do
     {[end_of_stream: :output], state}
   end
 
+  def handle_parent_notification({:stream_format, format}, _ctx, state) do
+    {[stream_format: {:output, format}], %{state | stream_format: format}}
+  end
+
+  def handle_parent_notification({:event, event}, _ctx, state) do
+    {[event: {:output, event}], state}
+  end
+
   @impl true
   def handle_event(
         pad,

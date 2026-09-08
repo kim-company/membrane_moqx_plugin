@@ -161,8 +161,8 @@ defmodule Membrane.MOQX.TestLite05Relay do
          {:ok, ctx} <- announce(ctx, announce, path),
          {:ok, subscribe, ctx} <-
            begin_subscription(parent, ctx, conn, path, track_name, track_info, options[:mode]),
-         {:ok, ctx} <- receive_subscription_ok(ctx, subscribe),
-         {:ok, capture, ctx} <- receive_group(ctx, conn, frames),
+         {:ok, ctx} <- receive_subscription_ok(ctx, subscribe, Keyword.get(options, :group, 0)),
+         {:ok, capture, ctx} <- receive_group(ctx, conn, frames, Keyword.get(options, :group, 0)),
          _message = send(parent, {:lite_capture, self(), capture}),
          {:ok, ctx} <- finish_subscription(parent, ctx, subscribe, options[:completion]),
          {:ok, ctx} <- verify_track_withdrawal(ctx, conn, path, track_name, options),
@@ -196,7 +196,7 @@ defmodule Membrane.MOQX.TestLite05Relay do
 
   defp finish_subscription(parent, ctx, stream, :publisher) do
     with {:ok, ctx} <-
-           expect_bytes(ctx, stream, Codec.encode_subscribe_response(%SubscribeEnd{group: 0})) do
+           expect_bytes(ctx, stream, Codec.encode_subscribe_response(%SubscribeEnd{group: 1})) do
       send(parent, {:lite_publisher_finished, self()})
       {:ok, ctx}
     end
@@ -302,15 +302,15 @@ defmodule Membrane.MOQX.TestLite05Relay do
     end
   end
 
-  defp receive_subscription_ok(ctx, stream) do
-    expect_bytes(ctx, stream, Codec.encode_subscribe_response(%SubscribeOk{group: 0}))
+  defp receive_subscription_ok(ctx, stream, group) do
+    expect_bytes(ctx, stream, Codec.encode_subscribe_response(%SubscribeOk{group: group}))
   end
 
-  defp receive_group(ctx, conn, frames) do
+  defp receive_group(ctx, conn, frames, group) do
     expected =
       IO.iodata_to_binary([
         <<0>>,
-        Codec.encode_group(%Group{subscribe_id: 42, group_sequence: 0}),
+        Codec.encode_group(%Group{subscribe_id: 42, group_sequence: group}),
         Enum.map(frames, fn {timestamp_delta, payload} ->
           Codec.encode_frame(%Frame{timestamp_delta: timestamp_delta, payload: payload})
         end)

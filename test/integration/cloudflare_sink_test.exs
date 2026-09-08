@@ -50,6 +50,7 @@ defmodule Membrane.MOQX.Integration.CloudflareSinkTest do
       |> child(:sink, %Sink{
         endpoint: endpoint,
         protocol: :cloudflare_draft_14,
+        profile: :cloudflare_cmsf,
         namespace: namespace,
         authorization: authorization,
         timeout: @timeout

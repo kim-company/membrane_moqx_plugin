@@ -5,26 +5,59 @@ defmodule Membrane.MOQX.CatalogSource do
   Catalog offers are parent notifications, not automatic links. Linking an
   exact output pad requests that track. Callers may also request an
   unadvertised track by supplying its canonical stream format in pad options.
+  Unlinking an output removes its Source and cancels that media subscription,
+  not the catalog subscription. The parent can select the track again later.
+  Selected Source notifications are forwarded as
+  `{:track_source, track_ref, notification}`. Each selected Source has its own
+  temporary crash group: a failure emits `{:track_source_down, track_ref, reason}`
+  without terminating the catalog or sibling Sources. Membrane removes the
+  failed selection's output pad. The parent must handle `handle_child_pad_removed/4`
+  and isolate the affected downstream branch in its own crash group: static-pad
+  consumers can fail when their upstream disappears, including during linking.
+  The parent may explicitly select that track on a new output link after the
+  failed branch is removed. Neither catalog refreshes nor Source failures retry
+  a selection automatically. Catalog/session failures still terminate this Bin.
+  The component's `Membrane.UtilitySupervisor` owns the Session process, which
+  is linked to this Bin to preserve failure propagation. It is not restarted
+  automatically; component teardown also terminates the owned Session.
+  Runtime subscription updates target a particular selection pad:
+  `{:update_subscription, output_pad_ref, request_id, options}`. The selected
+  Source's result and peer notifications use the existing `:track_source`
+  envelope. Unknown or not-ready selections instead report a direct
+  `{:subscription_update_result, request_id, {:error, reason}}`. A track address
+  alone is insufficient because multiple pads may select the same track.
 
-  The default catalog name is resolved only from the explicit protocol:
-  `catalog` for draft-16 and `.catalog` for Cloudflare draft-14. Draft-16
-  inline CMSF initialization is preserved in the offered stream format;
-  Cloudflare `initTrack` values retain their separate subscription path.
-  This is a CMSF catalog consumer, not a generic relay track enumerator.
+  Select `profile` independently from `protocol`: `:moqtail_cmsf` defaults to
+  `catalog`, `:cloudflare_cmsf` to `.catalog`, and `:hang` to `catalog.json`.
+  MOQX validates supported compositions; HANG currently requires Lite05.
+  A catalog name override changes the address, never the schema. `:none` is
+  rejected; use `Membrane.MOQX.Source` for an opaque exact track.
+  HANG `catalog_compression: :deflate` selects `catalog.json.z`; the default
+  `:none` selects plain `catalog.json`. Encoding and conventional name must
+  agree. Custom compressed names and CMSF DEFLATE are rejected, because MOQX's
+  HANG subscription decoder selects DEFLATE by the conventional name. There is
+  no automatic fallback or concurrent subscription to both encodings.
 
-  ## MoQ Lite limitation
+  CMSF inline initialization is preserved; Cloudflare `initTrack` values retain
+  their separate subscription path. HANG decoder metadata becomes canonical
+  selection parameters. CMAF retains its packaging; other HANG containers use
+  `hang/<kind>` packaging and require explicit media adapters before decoding.
+  A discovered offer is not a guarantee of playback compatibility.
 
-  This implementation rejects `:moq_lite_05` at initialization, including when
-  a catalog-name override is supplied. It has no Lite media-catalog profile;
-  this does not mean Lite forbids catalogs. HANG defines an application-level
-  `catalog.json` with media/decoder metadata, which this module does not parse.
-  Changing only the catalog track name would not implement that schema or its
-  media conventions.
+  Malformed snapshots emit `{:catalog_failed, error}` without discarding the
+  last valid offers or terminating the pipeline. A subscription failure, in
+  contrast, emits `{:catalog_failed, error}` and terminates this catalog source.
+  Connection loss emits `{:connection_closed, metadata}` before termination.
+  There is no automatic reconnect: a parent that wants recovery must isolate
+  the child in a crash group and create a replacement. Later valid snapshots
+  may replace the offered track metadata; existing linked Sources remain pipeline-owned.
+  An unsupported rendition emits `{:track_ignored, name, reason}` and invalidates
+  any old offer for that address with `{:track_unavailable, offer}`. Removal
+  uses MOQX's resolved address, including relative cross-broadcast references.
 
-  Use `Membrane.MOQX.Source` for a known Lite track and supply its stream format.
-  It can receive catalog bytes as opaque payload, but does not interpret those
-  bytes or discover media tracks. HANG discovery and player interoperability
-  require additional implementation and verification, not a protocol switch.
+  This module discovers tracks within a selected broadcast. Discovering the
+  broadcasts themselves is a separate `Membrane.MOQX.Session.discover/3`
+  operation; the application decides which catalogs to follow.
   """
 
   use Membrane.Bin
@@ -32,6 +65,7 @@ defmodule Membrane.MOQX.CatalogSource do
   import Membrane.ChildrenSpec
 
   alias Membrane.MOQX.{ProtocolConventions, Session, Source, Track, TrackOffer}
+  alias MOQX.Protocol.Resolver
 
   def_output_pad :output,
     availability: :on_request,
@@ -45,23 +79,30 @@ defmodule Membrane.MOQX.CatalogSource do
 
   def_options endpoint: [spec: binary() | URI.t(), required: true],
               protocol: [spec: atom() | module(), required: true],
+              profile: [spec: MOQX.Profile.t(), default: :none],
               namespace: [spec: [binary()], required: true],
               authorization: [spec: MOQX.Secret.t() | nil, default: nil],
               timeout: [spec: pos_integer(), default: 5_000],
               connect_options: [spec: keyword(), default: []],
               transport: [spec: term(), default: nil],
-              catalog_track_name: [spec: binary() | nil, default: nil]
+              catalog_track_name: [spec: binary() | nil, default: nil],
+              catalog_compression: [spec: :none | :deflate, default: :none]
 
   @impl true
   def handle_init(_ctx, options) do
-    catalog_track_name =
-      ProtocolConventions.catalog_track_name(options.protocol, options.catalog_track_name)
-
-    if is_nil(catalog_track_name) do
-      raise ArgumentError,
-            "CatalogSource does not support catalog-free protocol #{inspect(options.protocol)}; " <>
-              "use Source with an exact track"
+    if options.profile == :none do
+      raise ArgumentError, "CatalogSource requires a catalog profile; use Source for raw tracks"
     end
+
+    {:ok, protocol} = Resolver.fetch(options.protocol)
+    :ok = MOQX.Profile.validate(options.profile, protocol.id())
+
+    catalog_track_name =
+      ProtocolConventions.profile_catalog_track_name(
+        options.profile,
+        options.catalog_compression,
+        options.catalog_track_name
+      )
 
     state =
       options
@@ -81,13 +122,17 @@ defmodule Membrane.MOQX.CatalogSource do
   end
 
   @impl true
-  def handle_setup(_ctx, state) do
-    with {:ok, session} <- Session.start_link(session_options(state)),
+  def handle_setup(ctx, state) do
+    with {:ok, session} <-
+           Membrane.UtilitySupervisor.start_link_child(
+             ctx.utility_supervisor,
+             {Session, session_options(state)}
+           ),
          catalog_ref = %MOQX.TrackRef{
            namespace: state.namespace,
            track: state.catalog_track_name
          },
-         {:ok, subscription} <- Session.subscribe(session, catalog_ref, catalog?: true) do
+         {:ok, subscription} <- Session.subscribe(session, catalog_ref, profile: state.profile) do
       {[setup: :incomplete], %{state | session: session, catalog_subscription: subscription}}
     else
       {:error, reason} -> raise "failed to start MOQX catalog source: #{inspect(reason)}"
@@ -130,7 +175,7 @@ defmodule Membrane.MOQX.CatalogSource do
         {[], %{state | pads: pads}}
 
       {%{child: child}, pads} ->
-        {[remove_child: child], %{state | pads: pads}}
+        {[remove_children: child], %{state | pads: pads}}
     end
   end
 
@@ -141,6 +186,15 @@ defmodule Membrane.MOQX.CatalogSource do
         %{session: session, catalog_subscription: subscription} = state
       ) do
     {[setup: :complete, notify_parent: :catalog_ready], state}
+  end
+
+  def handle_info(
+        {:moqx_session, session,
+         %MOQX.Event.CatalogFailed{subscription: subscription, error: error}},
+        _ctx,
+        %{session: session, catalog_subscription: subscription} = state
+      ) do
+    {[notify_parent: {:catalog_failed, error}], state}
   end
 
   def handle_info(
@@ -191,6 +245,26 @@ defmodule Membrane.MOQX.CatalogSource do
   def handle_info(_message, _ctx, state), do: {[], state}
 
   @impl true
+  def handle_parent_notification({:update_subscription, pad, request_id, options}, _ctx, state) do
+    case state.pads[pad] do
+      %{child: child} when not is_nil(child) ->
+        {[notify_child: {child, {:update_subscription, request_id, options}}], state}
+
+      %{child: nil} ->
+        {[
+           notify_parent:
+             {:subscription_update_result, request_id, {:error, :selection_not_ready}}
+         ], state}
+
+      nil ->
+        {[notify_parent: {:subscription_update_result, request_id, {:error, :unknown_selection}}],
+         state}
+    end
+  end
+
+  def handle_parent_notification(_notification, _ctx, state), do: {[], state}
+
+  @impl true
   def handle_child_notification(notification, child, _ctx, state) do
     track_ref =
       Enum.find_value(state.pads, fn {_pad, pad_state} ->
@@ -198,6 +272,16 @@ defmodule Membrane.MOQX.CatalogSource do
       end)
 
     {[notify_parent: {:track_source, track_ref, notification}], state}
+  end
+
+  @impl true
+  def handle_crash_group_down({:track_selection, pad, track_ref}, ctx, state) do
+    state =
+      if Map.has_key?(state.pads, pad),
+        do: put_in(state, [:pads, pad, :child], nil),
+        else: state
+
+    {[notify_parent: {:track_source_down, track_ref, ctx.crash_reason}], state}
   end
 
   @impl true
@@ -292,7 +376,16 @@ defmodule Membrane.MOQX.CatalogSource do
         {offer_actions ++ pad_actions, state}
 
       {:error, reason} ->
-        {[notify_parent: {:track_ignored, catalog_track.name, reason}], state}
+        ref = catalog_track_ref(catalog_track, state.namespace)
+        {old_offer, offers} = Map.pop(state.offers, ref)
+        actions = [notify_parent: {:track_ignored, catalog_track.name, reason}]
+
+        actions =
+          if old_offer,
+            do: actions ++ [notify_parent: {:track_unavailable, old_offer}],
+            else: actions
+
+        {actions, %{state | offers: offers}}
     end
   end
 
@@ -323,14 +416,12 @@ defmodule Membrane.MOQX.CatalogSource do
       })
       |> bin_output(pad)
 
-    {spec, %{pad_state | child: child}}
+    {{spec, group: {:track_selection, pad, pad_state.track_ref}, crash_group_mode: :temporary},
+     %{pad_state | child: child}}
   end
 
   defp catalog_track_ref(catalog_track, namespace) do
-    case catalog_track.namespace do
-      value when is_binary(value) -> MOQX.Catalog.Track.track_ref(catalog_track)
-      _none -> %MOQX.TrackRef{namespace: namespace, track: catalog_track.name}
-    end
+    MOQX.Catalog.Track.track_ref(catalog_track, namespace)
   end
 
   defp session_options(state) do

@@ -13,6 +13,14 @@ defmodule Membrane.MOQX.Source do
   `subscription_options` pass through to `MOQX.subscribe/3`, including
   protocol-neutral start/filter, priority, group order, delivery timeout, and
   extension parameters supported by the selected MOQX implementation.
+  The parent can send `{:update_subscription, request_id, options}` at runtime.
+  `{:subscription_update_result, request_id, result}` reports local transport
+  admission only. Actual peer responses independently report
+  `{:subscription_updated, track_ref, parameters}` or
+  `{:subscription_update_failed, track_ref, error}`; no command correlation is
+  inferred. Lite has no update acknowledgement. An invalid/stale update or a
+  draft-16 peer rejection does not by itself terminate the active Source.
+  Shared sessions enforce the calling Source's ownership of its subscription.
 
   For `:moq_lite_05`, the Source converts each frame timestamp from the
   immutable track timescale into Membrane nanoseconds. The timestamp is
@@ -21,8 +29,13 @@ defmodule Membrane.MOQX.Source do
 
   The caller supplies the exact track and its canonical stream format. This
   element does not discover broadcasts, parse HANG catalogs, infer codecs,
-  demux media, or pace playback. Use `Membrane.MOQX.CatalogSource` only for its
-  supported CMSF catalog profiles.
+  demux media, or pace playback. Use `Membrane.MOQX.CatalogSource` with an
+  explicit HANG or CMSF profile for catalog offers. Complete zero-object Lite
+  groups emit `Membrane.MOQX.Event.EmptyGroup`, preserving their group ID, not
+  a buffer or EOS. HANG interprets this event as a codec-epoch boundary;
+  downstream decoders own resetting and playback policy. Partial/reset groups
+  and zero-byte objects are not empty-group boundaries. Events follow receive
+  order; this Source does not globally reorder concurrent group streams.
 
   Output uses push flow control. Subscriber demand at a remote publisher is
   not downstream Membrane demand. Completion describes the received protocol
@@ -107,6 +120,28 @@ defmodule Membrane.MOQX.Source do
 
   def handle_info(_message, _ctx, state), do: {[], state}
 
+  @impl true
+  def handle_parent_notification({:update_subscription, request_id, options}, _ctx, state) do
+    result =
+      cond do
+        state.ended? or is_nil(state.subscription) ->
+          {:error, :unknown_subscription}
+
+        not state.accepted? ->
+          {:error, :subscription_not_ready}
+
+        is_pid(state.session) ->
+          Session.update_subscription(state.session, state.subscription, options)
+
+        true ->
+          MOQX.update_subscription(state.client, state.subscription, options)
+      end
+
+    {[notify_parent: {:subscription_update_result, request_id, result}], state}
+  end
+
+  def handle_parent_notification(_notification, _ctx, state), do: {[], state}
+
   defp handle_event(
          %MOQX.Event.SubscriptionAccepted{
            subscription: subscription,
@@ -167,6 +202,22 @@ defmodule Membrane.MOQX.Source do
          %{subscription: subscription} = state
        ) do
     consume_or_queue({:subgroup_ended, event}, state)
+  end
+
+  defp handle_event(
+         %MOQX.Event.SubscriptionUpdated{subscription: subscription, parameters: parameters},
+         _ctx,
+         %{subscription: subscription} = state
+       ) do
+    {[notify_parent: {:subscription_updated, state.track, parameters}], state}
+  end
+
+  defp handle_event(
+         %MOQX.Event.SubscriptionUpdateFailed{subscription: subscription, error: error},
+         _ctx,
+         %{subscription: subscription} = state
+       ) do
+    {[notify_parent: {:subscription_update_failed, state.track, error}], state}
   end
 
   defp handle_event(
@@ -259,6 +310,22 @@ defmodule Membrane.MOQX.Source do
   end
 
   defp consume_event({:subscription_done, _completion}, state), do: {[], state}
+
+  defp consume_event(
+         {:subgroup_ended,
+          %MOQX.Event.SubgroupEnded{object_count: 0, outcome: :complete, end_of_group?: true} =
+            event},
+         %{protocol: protocol} = state
+       )
+       when protocol in [:moq_lite_05, MOQX.Protocol.MOQLite05] do
+    case start_object?(event, state) do
+      {true, state} ->
+        {[event: {:output, %Membrane.MOQX.Event.EmptyGroup{group_id: event.group_id}}], state}
+
+      {false, state} ->
+        {[], state}
+    end
+  end
 
   defp consume_event(
          {:subgroup_ended, event},

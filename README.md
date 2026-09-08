@@ -9,7 +9,7 @@ imply compatibility with every current public relay. See the dated
 [relay compatibility and retirement policy](docs/relay-compatibility.md):
 Cloudflare draft-14 and authenticated draft-16 controlled publication have
 observed immediate-EOS delivery failures, and the current public Moqtail
-relay requires draft-18, which MOQX 0.8.1 does not implement.
+relay requires draft-18, which MOQX 0.10.0 does not implement.
 
 Protocol selection is always explicit. `moqx` owns transport,
 draft-specific wire/lifecycle state, typed events, subscriptions,
@@ -41,8 +41,9 @@ formats and buffers with `Membrane.MOQX.Unit` metadata. A track contains an open
 string packaging identifier, optional initialization bytes, generic selection
 parameters, and additional JSON-compatible catalog fields.
 
-Format adapters translate that canonical contract without changing payload
-bytes. Pipelines that need frame-level H.264 or AAC buffers compose the
+Metadata adapters translate that canonical contract without changing payload
+bytes; the explicit HANG legacy filter adds or removes its container framing.
+Pipelines that need frame-level H.264 or AAC buffers from CMAF compose the
 appropriate CMAF/MP4 muxer or demuxer outside the core elements.
 
 ## Elements
@@ -54,8 +55,8 @@ appropriate CMAF/MP4 muxer or demuxer outside the core elements.
   tracks to its parent, and creates one internal `Source` only when the pipeline
   links the corresponding dynamic output pad. A pipeline may also request an
   unadvertised track by supplying its canonical stream format on that pad.
-- `Membrane.MOQX.Sink` advertises a namespace and, for catalog-bearing
-  protocols, a retained full catalog. Each
+- `Membrane.MOQX.Sink` advertises a namespace and, with an explicit catalog
+  profile, a retained full catalog. Each
   requested input pad accepts one canonical `Membrane.MOQX.Track`. The Sink
   assigns MOQ coordinates and finishes the namespace publication when it
   terminates.
@@ -65,10 +66,11 @@ appropriate CMAF/MP4 muxer or demuxer outside the core elements.
 Authorization tokens remain explicit caller input and are passed to `moqx` as
 redacted `MOQX.Secret` values.
 
-The default catalog track follows the selected protocol: `catalog` for
-`:draft_16` and `.catalog` for `:cloudflare_draft_14`. MoQ Lite exact-track
-operation publishes no catalog. Set
-`catalog_track_name` explicitly to override either convention. Endpoints and
+The default profile is `:none`: exact-track operation publishes no catalog.
+Select `profile: :moqtail_cmsf` for `catalog`, `:cloudflare_cmsf` for `.catalog`,
+or `:hang` for `catalog.json`. MOQX validates protocol/profile compositions;
+CatalogSource requires a catalog profile. Set
+`catalog_track_name` explicitly to override its address, not its schema. Endpoints and
 failed negotiation never select a protocol or catalog schema implicitly.
 
 ## Subscribing
@@ -132,10 +134,23 @@ path.
 
 ## MoQ Lite draft-05
 
-MoQ Lite is an explicit transport and publication protocol here; it is not a
-claim that the payload implements HANG. Exact known-track subscription is the
-supported contract. The plugin does not synthesize a CMSF or HANG catalog, and
-it does not create a separate initialization track.
+MoQ Lite is an explicit transport and publication protocol, independent of
+the application profile. The default `profile: :none` supports arbitrary exact
+tracks without a catalog or separate initialization track. Select
+`profile: :hang` on Sink and CatalogSource for HANG catalog publication and
+track offers. Compose `Hang.Legacy` for already-encoded Opus/H.264, or the
+`Hang.CMAF` track adapter for H.264/AAC CMAF. Neither encodes or decodes media.
+
+Local/public plugin roundtrips, pinned reference-player decoding, and reverse
+reference CMAF reception are recorded in [the HANG evidence report](docs/hang-interop-2026-09-07.md).
+MOQX 0.10.0 supplies bounded absent-track metadata provisioning and empty-group
+codec epochs. Sink exposes opt-in metadata decisions; Source and the HANG
+adapters preserve `Membrane.MOQX.Event.EmptyGroup` independently of media and EOS.
+HANG catalogs support explicit plain or DEFLATE encoding; selected subscriptions
+can be updated through parent commands. See the module documentation for exact
+options, notifications and the capability matrix. LOC, optional Lite FETCH,
+PROBE and GOAWAY, datagram delivery and alternative transport bindings are not
+implemented by the plugin. See [reproducible interop recipes](scripts/interop/README.md).
 
 A Source receives the immutable track timescale from `TRACK_INFO`. Frame
 timestamps are converted to Membrane nanoseconds independently of group and
@@ -212,6 +227,7 @@ source
 |> child(:moqx_sink, %Sink{
   endpoint: "moqt://draft-14.cloudflare.mediaoverquic.com:443",
   protocol: :cloudflare_draft_14,
+  profile: :cloudflare_cmsf,
   namespace: ["my-service", "camera-1"]
 })
 ```
@@ -250,6 +266,7 @@ source
 |> child(:moqx_sink, %Membrane.MOQX.Sink{
   endpoint: draft16_endpoint,
   protocol: :draft_16,
+  profile: :moqtail_cmsf,
   namespace: ["my-service", "camera-1"],
   catalog_refresh_interval: 1_000
 })
