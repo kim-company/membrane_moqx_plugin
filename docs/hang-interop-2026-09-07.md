@@ -329,3 +329,21 @@ Upstream candidate validation addendum (2026-09-08):
   reports `track_already_registered`. The public failure-injection regression
   and [review finding](https://github.com/dmorn/moqx/pull/50#discussion_r3956433236)
   make this a remaining API-contract release gate, not merely a missing log.
+
+Approved upstream failure-path fixes (2026-09-08): PR #50 `0899ca9` now returns
+the locally registered track handle independently of metadata reply success.
+Each request reports its actual send-admission result; failed cleanup attempts
+do not suppress that outcome. PR #49 `8293d92` also isolates late TRACK_INFO and
+SUBSCRIBE responses after rejection or local cancellation, preserving an active
+catalog sibling. Both fixes were independently reviewed with no new actionable
+findings; the registration-handle review finding was verified and resolved.
+
+A fresh isolated merge of these exact heads passed 315 upstream tests with 41
+integration exclusions (seed 331579), followed by four native local-relay tests
+for metadata provisioning/rejection/timeout and empty groups (seed 409526,
+verified TLS). The plugin against that combined source candidate passed all
+101 tests with eight integration exclusions (seed 331579). These observations
+supersede the unresolved registration defect above, but do not explain every
+earlier intermittent failure or certify public-browser reset stability. Neither
+upstream PR is merged/released by this work; the real plugin dependency remains
+MOQX 0.9.0 and the remaining plugin feature integrations are still outstanding.
