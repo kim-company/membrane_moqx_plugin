@@ -48,7 +48,7 @@ defmodule Membrane.MOQX do
   | --- | --- | --- |
   | Raw Lite exact tracks, PTS and final-buffer/EOS | Source/Sink; SourceTest, SinkTest, LiteRoundtripTest; local/public QUIC | Implemented, verified for exercised paths |
   | Broadcast snapshot/add/remove/cancel and owner isolation | Session; SessionTest; native HANG roundtrip distinguishes track withdrawal from broadcast departure on local/public relays | Implemented, tested |
-  | HANG catalog offers, selection, malformed snapshots and removal | CatalogSource/TrackOffer; CatalogSourceTest and LiteRoundtripTest: retained offers through malformed snapshots, deselection/reselection, rejection and parent-managed replacement | Exercised paths verified; selected Source failure terminates the whole Bin, without per-track retry |
+  | HANG catalog offers, selection, malformed snapshots and removal | CatalogSource/TrackOffer; CatalogSourceTest and LiteRoundtripTest: retained offers through malformed snapshots, deselection/reselection, rejection and parent-managed replacement | Selected Sources are isolated; catalog and sibling selections survive. Parent handles removed output pads/downstream branches; no automatic retry |
   | Empty/late HANG catalog publication | Sink; SinkTest and native HANG roundtrip | Implemented, tested |
   | Legacy Opus/H.264 framing, PTS, keyframe flags and MediaEnd | Hang.Legacy; HangLegacyTest; both reference directions local/public, including independent decoded output | Implemented, verified for pinned stack; reverse decoder orders groups offline, not a plugin playback guarantee |
   | H.264/AAC CMAF metadata and chunks | Hang.CMAF; HangCMAFTest and SinkTest; both reference directions local/public | Implemented, verified for pinned stack |
@@ -71,8 +71,9 @@ defmodule Membrane.MOQX do
   publication received by the plugin and independently decoded. Reverse legacy
   capture preserves arrival order; its offline decoder orders groups/objects
   explicitly. This is not bounded-latency playback or A/V synchronization proof.
-  Selected Source failures propagate through the CatalogSource Bin; parents
-  must isolate affected components for outer pipeline survival. This is a pinned test
+  Selected Sources have individual crash groups; parents handle removed output
+  pads and isolate affected downstream branches for outer pipeline survival.
+  Catalog/session failures remain Bin-wide. This is a pinned test
   matrix, not universal codec/browser or lifecycle certification. See
   `docs/hang-interop-2026-09-07.md` for exact versions and remaining gates, and
   `docs/relay-compatibility.md` for older results and protocol-retirement gates.

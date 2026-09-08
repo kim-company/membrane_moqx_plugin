@@ -8,11 +8,15 @@ defmodule Membrane.MOQX.CatalogSource do
   Unlinking an output removes its Source and cancels that media subscription,
   not the catalog subscription. The parent can select the track again later.
   Selected Source notifications are forwarded as
-  `{:track_source, track_ref, notification}`. A selected Source failure is not
-  isolated within this Bin: it terminates the CatalogSource, including other
-  selections. Parents requiring pipeline survival must isolate this Bin and
-  affected downstream consumers in crash groups; static-pad consumers can fail
-  when their upstream disappears during linking. There is no per-track retry.
+  `{:track_source, track_ref, notification}`. Each selected Source has its own
+  temporary crash group: a failure emits `{:track_source_down, track_ref, reason}`
+  without terminating the catalog or sibling Sources. Membrane removes the
+  failed selection's output pad. The parent must handle `handle_child_pad_removed/4`
+  and isolate the affected downstream branch in its own crash group: static-pad
+  consumers can fail when their upstream disappears, including during linking.
+  The parent may explicitly select that track on a new output link after the
+  failed branch is removed. Neither catalog refreshes nor Source failures retry
+  a selection automatically. Catalog/session failures still terminate this Bin.
 
   Select `profile` independently from `protocol`: `:moqtail_cmsf` defaults to
   `catalog`, `:cloudflare_cmsf` to `.catalog`, and `:hang` to `catalog.json`.
@@ -227,6 +231,16 @@ defmodule Membrane.MOQX.CatalogSource do
   end
 
   @impl true
+  def handle_crash_group_down({:track_selection, pad, track_ref}, ctx, state) do
+    state =
+      if Map.has_key?(state.pads, pad),
+        do: put_in(state, [:pads, pad, :child], nil),
+        else: state
+
+    {[notify_parent: {:track_source_down, track_ref, ctx.crash_reason}], state}
+  end
+
+  @impl true
   def handle_terminate_request(_ctx, state) do
     if is_pid(state.session) and Process.alive?(state.session), do: Session.close(state.session)
     {[terminate: :normal], state}
@@ -358,7 +372,8 @@ defmodule Membrane.MOQX.CatalogSource do
       })
       |> bin_output(pad)
 
-    {spec, %{pad_state | child: child}}
+    {{spec, group: {:track_selection, pad, pad_state.track_ref}, crash_group_mode: :temporary},
+     %{pad_state | child: child}}
   end
 
   defp catalog_track_ref(catalog_track, namespace) do

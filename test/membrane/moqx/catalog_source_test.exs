@@ -19,8 +19,8 @@ defmodule Membrane.MOQX.CatalogSourceTest do
 
   require Pad
 
-  test "forwards rejected selected media errors before terminating its catalog crash group" do
-    alias Membrane.MOQX.{Sink, TestLiteBridge}
+  test "isolates rejected selected media without terminating its catalog" do
+    alias Membrane.MOQX.{Sink, TestControlledSource, TestLiteBridge}
     relay = TestLiteBridge.start(reject_track: "blocked")
     namespace = ["room", "media-rejected.hang"]
 
@@ -38,8 +38,27 @@ defmodule Membrane.MOQX.CatalogSourceTest do
 
     assert_pipeline_notified(publisher, :publisher, {:publication_ready, ^namespace})
 
+    format = %Track{
+      packaging: "hang/legacy",
+      initialization: nil,
+      catalog_fields: %{"role" => "audio"},
+      selection_params: %{"codec" => "opus", "sampleRate" => 48_000, "numberOfChannels" => 2}
+    }
+
+    for name <- ["healthy", "blocked"] do
+      Testing.Pipeline.execute_actions(publisher,
+        spec:
+          child({:producer, name}, %TestControlledSource{stream_format: format})
+          |> via_in(Pad.ref(:input, name), options: [track_name: name, timescale: 1_000_000])
+          |> get_child(:publisher)
+      )
+
+      assert_pipeline_notified(publisher, :publisher, {:track_ready, _, ^name})
+    end
+
     pipeline =
       Testing.Pipeline.start_link_supervised!(
+        raise_on_child_pad_removed?: false,
         spec:
           {child(:catalog, %CatalogSource{
              endpoint: relay.subscriber_endpoint,
@@ -52,14 +71,31 @@ defmodule Membrane.MOQX.CatalogSourceTest do
 
     assert_pipeline_notified(pipeline, :catalog, :catalog_ready)
     ref = %MOQX.TrackRef{namespace: namespace, track: "blocked"}
+    healthy_ref = %MOQX.TrackRef{namespace: namespace, track: "healthy"}
 
-    # Explicitly described selection is a public CatalogSource operation even
-    # when the current catalog does not advertise this address.
+    assert_pipeline_notified(pipeline, :catalog, {:track_available, %TrackOffer{track_ref: ^ref}})
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:track_available, %TrackOffer{track_ref: ^healthy_ref} = healthy_offer}
+    )
+
+    Testing.Pipeline.execute_actions(pipeline,
+      spec:
+        get_child(:catalog)
+        |> via_out(Pad.ref(:output, :healthy), options: [track: healthy_ref])
+        |> child(:healthy_consumer, Testing.Sink)
+    )
+
+    assert_pipeline_notified(publisher, :publisher, {:subscriber_joined, "healthy", _, 1})
+
+    # A parent's static-pad consumer is isolated separately from the catalog.
     Testing.Pipeline.execute_actions(pipeline,
       spec:
         {get_child(:catalog)
          |> via_out(Pad.ref(:output, :blocked),
-           options: [track: ref, stream_format: %Track{packaging: "opus", initialization: nil}]
+           options: [track: ref]
          )
          |> child(:consumer, Testing.Sink), group: :selected_media, crash_group_mode: :temporary}
     )
@@ -72,9 +108,53 @@ defmodule Membrane.MOQX.CatalogSourceTest do
         %MOQX.ProtocolError{protocol: :moq_lite_05, operation: :subscribe, code: 0x10}}}
     )
 
-    assert_child_terminated(pipeline, :catalog)
+    assert_pipeline_notified(pipeline, :catalog, {:track_source_down, ^ref, _reason})
     assert_child_terminated(pipeline, :consumer)
+    refute_child_terminated(pipeline, :catalog, 100)
     assert Process.alive?(pipeline)
+
+    Testing.Pipeline.notify_child(
+      publisher,
+      {:producer, "healthy"},
+      {:publish,
+       [%Buffer{payload: "survived", pts: 1_000_000, metadata: %{moqx: %Unit{group_end?: true}}}]}
+    )
+
+    assert_sink_buffer(pipeline, :healthy_consumer, %Buffer{payload: "survived", pts: 1_000_000})
+    :ok = TestLiteBridge.allow_tracks(relay)
+    refute_pipeline_notified(publisher, :publisher, {:subscriber_joined, "blocked", _, _}, 100)
+
+    # Only this explicit parent replacement requests the formerly failed track.
+    Testing.Pipeline.execute_actions(pipeline,
+      spec:
+        {get_child(:catalog)
+         |> via_out(Pad.ref(:output, :blocked), options: [track: ref])
+         |> child(:replacement, Testing.Sink),
+         group: :replacement_media, crash_group_mode: :temporary}
+    )
+
+    assert_pipeline_notified(publisher, :publisher, {:subscriber_joined, "blocked", _, 1})
+
+    Testing.Pipeline.notify_child(
+      publisher,
+      {:producer, "blocked"},
+      {:publish,
+       [
+         %Buffer{
+           payload: "reselected",
+           pts: 2_000_000,
+           metadata: %{moqx: %Unit{group_end?: true}}
+         }
+       ]}
+    )
+
+    assert_sink_buffer(pipeline, :replacement, %Buffer{payload: "reselected", pts: 2_000_000})
+    Testing.Pipeline.execute_actions(pipeline, remove_children: :replacement)
+    assert_child_terminated(pipeline, :replacement)
+    assert_pipeline_notified(publisher, :publisher, {:subscriber_left, "blocked", _, 0})
+
+    Testing.Pipeline.notify_child(publisher, {:producer, "healthy"}, :end_of_stream)
+    assert_pipeline_notified(pipeline, :catalog, {:track_unavailable, ^healthy_offer})
     Testing.Pipeline.terminate(pipeline)
     Testing.Pipeline.terminate(publisher)
     assert :ok = TestLiteBridge.stop(relay)

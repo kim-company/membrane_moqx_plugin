@@ -38,6 +38,17 @@ defmodule Membrane.MOQX.TestLiteBridge do
     :ok
   end
 
+  def allow_tracks(relay) do
+    ref = make_ref()
+    send(relay.upstream.pid, {:allow_tracks, self(), ref})
+
+    receive do
+      ^ref -> :ok
+    after
+      2_000 -> raise "Lite bridge did not update its admission policy"
+    end
+  end
+
   defp endpoint(task) do
     receive do
       {:bridge_listening, pid, port} when pid == task.pid -> "moql://localhost:#{port}"
@@ -112,6 +123,11 @@ defmodule Membrane.MOQX.TestLiteBridge do
   defp handle({:disconnect, code}, state) do
     {:ok, ctx} = Transport.close_connection(state.ctx, state.conn, code)
     %{state | ctx: ctx, closed?: true}
+  end
+
+  defp handle({:allow_tracks, caller, ref}, state) do
+    send(caller, ref)
+    %{state | reject_track: nil}
   end
 
   defp handle(

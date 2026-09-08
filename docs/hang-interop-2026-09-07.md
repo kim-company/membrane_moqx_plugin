@@ -219,6 +219,16 @@ The full suite passed 94 tests with eight opt-in integrations excluded (seed
 
 ## Still unverified or incomplete
 
+Approved track-isolation implementation (2026-09-08): selected Sources now have
+individual temporary crash groups. A public HANG lifecycle regression verifies
+rejected selection reporting, surviving sibling media, parent-driven same-pad
+replacement, cancellation/zero demand, and continuing catalog updates. It passed
+eleven consecutive runs; catalog/lifecycle suites passed 18 tests (seed 571351).
+This supersedes the Bin-wide selected-Source failure limitation recorded below.
+Membrane removes the failed output pad; parents handle child-pad removal and
+isolate the affected downstream branch. There is no automatic retry, and genuine
+catalog/session failure still terminates the Bin.
+
 Discovery/catalog composition addendum (2026-09-08): the native HANG roundtrip
 now verifies that media EOS removes its catalog offer while a fresh discovery
 snapshot still sees the broadcast. Only closing the publisher produces
