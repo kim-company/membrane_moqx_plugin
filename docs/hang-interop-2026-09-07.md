@@ -203,6 +203,20 @@ bounded-latency playback or loss-recovery certification. No production behavior
 change was needed. The full suite passed 93 tests with eight opt-in integrations
 excluded (seed 98383); strict Credo passed.
 
+## Catalog deselection addendum — 2026-09-08
+
+Catalog pad-removal regression (2026-09-08): a full HANG pipeline uncovered an
+invalid `remove_child` Bin action when deselecting media. The fix uses Membrane's
+supported `remove_children` action. The public-pipeline test now receives media,
+removes the linked adapter/sink, observes publisher media demand return to zero,
+reselects the same catalog pad and receives new media. A subsequent catalog
+withdrawal still reaches the parent after both media selections are removed,
+proving catalog subscription independence. The focused regression passed six
+consecutive runs. This is explicit deselection/reselection, not automatic
+recovery from a crashing linked Source.
+The full suite passed 94 tests with eight opt-in integrations excluded (seed
+551623), and strict Credo passed.
+
 ## Still unverified or incomplete
 
 - Reverse legacy Opus/H.264 and reverse CMAF receive/decode are verified above;

@@ -114,6 +114,83 @@ defmodule Membrane.MOQX.LiteRoundtripTest do
     assert :ok = TestLiteBridge.stop(relay)
   end
 
+  test "catalog media deselection cancels demand and permits reselection without losing the catalog" do
+    relay = TestLiteBridge.start()
+    namespace = ["hermetic", "reselect.hang"]
+
+    format = %Track{
+      packaging: "opus",
+      initialization: nil,
+      selection_params: %{"codec" => "opus", "sampleRate" => 48_000, "numberOfChannels" => 2}
+    }
+
+    publisher =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:producer, %TestControlledSource{stream_format: format})
+          |> child(:framing, %Membrane.MOQX.Hang.Legacy{direction: :encode})
+          |> via_in(Pad.ref(:input, :opus), options: [track_name: "opus", timescale: 1_000_000])
+          |> child(:sink, %Sink{
+            endpoint: relay.publisher_endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: relay.transport
+          })
+      )
+
+    assert_pipeline_notified(publisher, :sink, {:track_ready, _, "opus"})
+
+    subscriber =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:catalog, %Membrane.MOQX.CatalogSource{
+            endpoint: relay.subscriber_endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: relay.transport
+          })
+      )
+
+    assert_pipeline_notified(
+      subscriber,
+      :catalog,
+      {:track_available, %Membrane.MOQX.TrackOffer{track_ref: ref} = offer}
+    )
+
+    for generation <- 1..2 do
+      Testing.Pipeline.execute_actions(subscriber,
+        spec:
+          get_child(:catalog)
+          |> via_out(Pad.ref(:output, :opus), options: [track: ref])
+          |> child(:framing, %Membrane.MOQX.Hang.Legacy{direction: :decode})
+          |> child(:sink, Testing.Sink)
+      )
+
+      assert_pipeline_notified(publisher, :sink, {:subscriber_joined, "opus", _, 1})
+      pts = generation * 1_000_000
+      packet = buffer(<<generation>>, pts, true)
+      Testing.Pipeline.notify_child(publisher, :producer, {:publish, [packet]})
+
+      assert_sink_buffer(subscriber, :sink, %Buffer{payload: <<^generation>>, pts: ^pts})
+
+      Testing.Pipeline.execute_actions(subscriber, remove_children: [:framing, :sink])
+      assert_child_terminated(subscriber, :framing)
+      assert_child_terminated(subscriber, :sink)
+      assert_pipeline_notified(publisher, :sink, {:subscriber_left, "opus", _, 0})
+    end
+
+    # A live catalog update after both media selections were removed proves
+    # media cancellation did not cancel the catalog's independent subscription.
+    Testing.Pipeline.notify_child(publisher, :producer, :end_of_stream)
+    assert_pipeline_notified(subscriber, :catalog, {:track_unavailable, ^offer})
+    assert Process.alive?(subscriber)
+    Testing.Pipeline.terminate(subscriber)
+    Testing.Pipeline.terminate(publisher)
+    assert :ok = TestLiteBridge.stop(relay)
+  end
+
   test "HANG Sink catalog selection preserves legacy media and withdraws the finished offer" do
     relay = TestLiteBridge.start()
     namespace = ["hermetic", "hang"]

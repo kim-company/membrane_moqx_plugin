@@ -5,6 +5,8 @@ defmodule Membrane.MOQX.CatalogSource do
   Catalog offers are parent notifications, not automatic links. Linking an
   exact output pad requests that track. Callers may also request an
   unadvertised track by supplying its canonical stream format in pad options.
+  Unlinking an output removes its Source and cancels that media subscription,
+  not the catalog subscription. The parent can select the track again later.
 
   Select `profile` independently from `protocol`: `:moqtail_cmsf` defaults to
   `catalog`, `:cloudflare_cmsf` to `.catalog`, and `:hang` to `catalog.json`.
@@ -139,7 +141,7 @@ defmodule Membrane.MOQX.CatalogSource do
         {[], %{state | pads: pads}}
 
       {%{child: child}, pads} ->
-        {[remove_child: child], %{state | pads: pads}}
+        {[remove_children: child], %{state | pads: pads}}
     end
   end
 
