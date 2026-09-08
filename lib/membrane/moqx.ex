@@ -47,10 +47,10 @@ defmodule Membrane.MOQX do
   | Capability | Contract and verification | Status |
   | --- | --- | --- |
   | Raw Lite exact tracks, PTS and final-buffer/EOS | Source/Sink; SourceTest, SinkTest, LiteRoundtripTest; local/public QUIC | Implemented, verified for exercised paths |
-  | Broadcast snapshot/add/remove/cancel and owner isolation | Session; SessionTest; raw native roundtrip discovers publication | Implemented, tested |
-  | HANG catalog offers, selection, malformed snapshots and removal | CatalogSource/TrackOffer; CatalogSourceTest and LiteRoundtripTest | Implemented; complete failure/reuse matrix pending |
+  | Broadcast snapshot/add/remove/cancel and owner isolation | Session; SessionTest; native HANG roundtrip distinguishes track withdrawal from broadcast departure on local/public relays | Implemented, tested |
+  | HANG catalog offers, selection, malformed snapshots and removal | CatalogSource/TrackOffer; CatalogSourceTest and LiteRoundtripTest: retained offers through malformed snapshots, deselection/reselection, rejection and parent-managed replacement | Exercised paths verified; selected Source failure terminates the whole Bin, without per-track retry |
   | Empty/late HANG catalog publication | Sink; SinkTest and native HANG roundtrip | Implemented, tested |
-  | Legacy Opus/H.264 framing, PTS, keyframe flags and MediaEnd | Hang.Legacy; HangLegacyTest; local/public reference-player decoding | Implemented; reverse legacy reference proof pending |
+  | Legacy Opus/H.264 framing, PTS, keyframe flags and MediaEnd | Hang.Legacy; HangLegacyTest; both reference directions local/public, including independent decoded output | Implemented, verified for pinned stack; reverse decoder orders groups offline, not a plugin playback guarantee |
   | H.264/AAC CMAF metadata and chunks | Hang.CMAF; HangCMAFTest and SinkTest; both reference directions local/public | Implemented, verified for pinned stack |
   | Multi-subscriber demand and owner teardown | LiteRoundtripTest and native LiteMultiSourceTest: shared Sources, abrupt departure, survivor media, zero demand and resubscription; SinkTest: controlled decisions | Exercised paths verified hermetically and on local/public relays; absent-track admission blocked |
   | Hermetic full Sink-to-Source semantic relay | LiteRoundtripTest: raw groups/PTS/immediate EOS and HANG catalog selection/media/offer withdrawal | Implemented, tested |
@@ -67,8 +67,12 @@ defmodule Membrane.MOQX do
 
   Verification includes complete raw and catalog-selected HANG plugin
   Source/Sink roundtrips through local and public Lite relays, reference-browser
-  Opus/H.264 and H.264/AAC CMAF decoding, and reverse reference CMAF publication
-  received by the plugin and independently decoded. This is a pinned test
+  Opus/H.264 and H.264/AAC CMAF decoding, and reverse reference legacy/CMAF
+  publication received by the plugin and independently decoded. Reverse legacy
+  capture preserves arrival order; its offline decoder orders groups/objects
+  explicitly. This is not bounded-latency playback or A/V synchronization proof.
+  Selected Source failures propagate through the CatalogSource Bin; parents
+  must isolate affected components for outer pipeline survival. This is a pinned test
   matrix, not universal codec/browser or lifecycle certification. See
   `docs/hang-interop-2026-09-07.md` for exact versions and remaining gates, and
   `docs/relay-compatibility.md` for older results and protocol-retirement gates.
