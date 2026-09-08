@@ -538,7 +538,7 @@ defmodule Membrane.MOQX.Sink do
             state
           )
 
-        {[notify_parent: notification] ++ subscription_actions, state}
+        flush_ready_pad(pad, [notify_parent: notification] ++ subscription_actions, state)
 
       {:error, reason} ->
         raise "failed to publish MOQX catalog: #{inspect(reason)}"
@@ -1010,15 +1010,12 @@ defmodule Membrane.MOQX.Sink do
         state = put_in(state, [:pads, pad], pad_state)
 
         if pad_state.ready? do
-          {actions, state} =
-            publish_prepared_track(
-              pad,
-              pad_state,
-              pad_state.pending_notification,
-              state
-            )
-
-          flush_ready_pad(pad, actions, state)
+          publish_prepared_track(
+            pad,
+            pad_state,
+            pad_state.pending_notification,
+            state
+          )
         else
           {[], state}
         end
