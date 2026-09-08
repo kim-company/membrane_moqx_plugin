@@ -11,6 +11,9 @@ defmodule Membrane.MOQX.Session do
   subscription to MOQX; they are not connection-global. Discovery reports
   paths, never automatically subscribes to catalogs or creates media Sources.
   Subscription/discovery owner exit cancels only that owner's handles.
+  `update_subscription/3` uses the same owner boundary. Typed peer update
+  acknowledgements and rejections, when the protocol provides them, are routed
+  only to that owner and do not end the subscription.
   Its protocol is fixed at startup; Sources sharing it
   must select the same resolved protocol. It does not automatically retry a
   different draft when a relay rejects the selected one.
@@ -39,6 +42,17 @@ defmodule Membrane.MOQX.Session do
   def unsubscribe(session, subscription) do
     GenServer.call(session, {:unsubscribe, subscription})
   end
+
+  @doc """
+  Updates a subscription owned by the caller using MOQX's protocol-specific options.
+
+  Success reports local transport admission, not relay acknowledgement. Unknown
+  handles and callers other than the subscription owner are rejected. Failed
+  updates do not remove the subscription or its owner monitor.
+  """
+  @spec update_subscription(pid(), MOQX.Subscription.t(), keyword()) :: :ok | {:error, term()}
+  def update_subscription(session, subscription, options),
+    do: GenServer.call(session, {:update_subscription, subscription, options})
 
   @doc "Discovers broadcast paths, routing MOQX discovery events to the caller."
   @spec discover(pid(), binary(), keyword()) :: {:ok, MOQX.Discovery.t()} | {:error, term()}
@@ -137,6 +151,17 @@ defmodule Membrane.MOQX.Session do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call({:update_subscription, subscription, options}, {owner, _tag}, state) do
+    result =
+      case state.subscriptions[subscription] do
+        %{owner: ^owner} -> MOQX.update_subscription(state.client, subscription, options)
+        nil -> {:error, :unknown_subscription}
+        _other_owner -> {:error, :not_subscription_owner}
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({:unsubscribe, subscription}, {owner, _tag}, state) do
@@ -243,6 +268,12 @@ defmodule Membrane.MOQX.Session do
   end
 
   defp event_subscription(%MOQX.Event.SubscriptionAccepted{subscription: subscription}),
+    do: subscription
+
+  defp event_subscription(%MOQX.Event.SubscriptionUpdated{subscription: subscription}),
+    do: subscription
+
+  defp event_subscription(%MOQX.Event.SubscriptionUpdateFailed{subscription: subscription}),
     do: subscription
 
   defp event_subscription(%MOQX.Event.CatalogReceived{subscription: subscription}),
