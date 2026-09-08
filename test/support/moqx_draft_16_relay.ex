@@ -21,6 +21,10 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     start_mode(namespace, media_track, :reactive)
   end
 
+  def start_initialized(namespace, media_track) do
+    start_mode(namespace, media_track, :initialized)
+  end
+
   defp start_mode(namespace, media_track, mode) do
     {:ok, network} = Support.start_network()
     parent = self()
@@ -132,13 +136,14 @@ defmodule Membrane.MOQX.TestDraft16Relay do
   end
 
   defp serve(parent, ctx, listener, port, namespace, media_name, mode) do
-    catalog_ref = %MOQX.TrackRef{namespace: namespace, track: "catalog"}
+    catalog_name = if mode == :initialized, do: ".catalog", else: "catalog"
+    catalog_ref = %MOQX.TrackRef{namespace: namespace, track: catalog_name}
     media_ref = %MOQX.TrackRef{namespace: namespace, track: media_name}
 
     with {:ok, conn, ctx} <- Transport.accept(ctx, listener, [], @timeout),
          {:ok, conn, ctx} <- Transport.handshake(ctx, conn, @timeout),
          {:ok, control, ctx} <- Transport.accept_stream(ctx, conn, [], @timeout),
-         {:ok, ctx} <- setup(ctx, control, port),
+         {:ok, ctx} <- setup(ctx, control, port, if(mode == :initialized, do: 16, else: 4)),
          {:ok, ctx} <- accept_publication(ctx, control, namespace),
          {:ok, ctx} <- ready_track(parent, ctx, control, 2, catalog_ref, 0) do
       serve_mode(parent, ctx, conn, control, media_ref, mode)
@@ -148,6 +153,33 @@ defmodule Membrane.MOQX.TestDraft16Relay do
   defp serve_mode(parent, ctx, conn, control, media_ref, {:capture, delivery}) do
     with {:ok, ctx} <- ready_track(parent, ctx, control, 4, media_ref, 1) do
       capture_publication(parent, ctx, conn, delivery)
+    end
+  end
+
+  defp serve_mode(parent, ctx, conn, control, media_ref, :initialized) do
+    init_ref = %{media_ref | track: media_ref.track <> ".init"}
+
+    with {:ok, ctx} <- ready_track(parent, ctx, control, 4, init_ref, 1),
+         {:ok, initialization, ctx} <- receive_subgroup(ctx, conn),
+         {:ok, ctx} <- ready_track(parent, ctx, control, 6, media_ref, 2),
+         {:ok, catalog, ctx} <- receive_subgroup(ctx, conn) do
+      send(
+        parent,
+        {:draft16_capture, self(), %{initialization: initialization, catalog: catalog}}
+      )
+
+      with {:ok, ctx} <-
+             ready_track(parent, ctx, control, 8, %{init_ref | track: init_ref.track <> ".1"}, 3),
+           {:ok, next_initialization, ctx} <- receive_subgroup(ctx, conn),
+           {:ok, next_catalog, ctx} <- receive_subgroup(ctx, conn) do
+        send(
+          parent,
+          {:draft16_capture, self(),
+           %{initialization: next_initialization, catalog: next_catalog}}
+        )
+
+        await_stop(ctx, conn)
+      end
     end
   end
 
@@ -230,12 +262,12 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     end
   end
 
-  defp setup(ctx, control, port) do
+  defp setup(ctx, control, port, max_request_id) do
     expected = Codec.client_setup(URI.parse("moqt://localhost:#{port}"))
 
     with {:ok, ^expected, ctx} <- Transport.recv_stream(ctx, control, byte_size(expected)),
          {:ok, _send, ctx} <-
-           Transport.send_stream(ctx, control, <<0x21, 0, 3, 1, 2, 4>>) do
+           Transport.send_stream(ctx, control, <<0x21, 0, 3, 1, 2, max_request_id>>) do
       {:ok, ctx}
     end
   end

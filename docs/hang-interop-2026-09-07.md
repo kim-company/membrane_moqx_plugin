@@ -219,6 +219,20 @@ The full suite passed 94 tests with eight opt-in integrations excluded (seed
 
 ## Still unverified or incomplete
 
+Approved initialization implementation (2026-09-08): initialization now follows
+the selected profile, including Moqtail inline metadata over Cloudflare and
+Cloudflare separate initialization over draft-16/Lite. Public regressions exposed
+the previous nil-track crash, missing Lite timestamps, and draft-16 publication
+before initialization readiness. The implementation uses valid Lite timing/FIN
+and event-driven readiness of both initialization/media tracks. Draft-16 initial
+and changed-generation capture passes, and all 35 Sink tests passed (seed 326769).
+Inline/separate Lite catalog update tests pass in focused runs, but full/stress
+runs expose a distinct MOQX 0.9.0 defect: unsubscribe after an initialization
+object followed by peer group FIN raises `unknown_group_subscription`. A minimal
+public MOQX reproduction without CatalogSource/Sink confirms this. Upstream group
+lifecycle work owns the fix; release certification remains blocked until a
+released MOQX fix is consumed. No dependency patch or delay workaround is used.
+
 Approved track-isolation implementation (2026-09-08): selected Sources now have
 individual temporary crash groups. A public HANG lifecycle regression verifies
 rejected selection reporting, surviving sibling media, parent-driven same-pad

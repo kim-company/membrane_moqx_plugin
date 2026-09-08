@@ -22,11 +22,17 @@ defmodule Membrane.MOQX.Sink do
   and Session broadcast withdrawal are distinct notifications/lifecycles.
 
   With `:none`, canonical initialization remains caller-owned metadata; no
-  catalog or initialization track is synthesized. Current CMSF publication
-  verification covers Cloudflare CMSF on draft-14 and Moqtail CMSF on draft-16.
-  Although MOQX accepts other CMSF/transport compositions, this Sink's
-  initialization lifecycle has not yet been made profile-owned throughout:
-  do not use those cross-compositions for initialized media (PR #12 review).
+  catalog or initialization track is synthesized. Initialization is profile-owned:
+  Moqtail CMSF uses inline `initData`, Cloudflare CMSF uses a separate retained
+  initialization track, and HANG uses its decoder/container metadata. Transport
+  selection controls delivery mechanics, including Lite timestamps and completed
+  groups. On draft-16, separate initialization waits for relay track readiness;
+  media readiness and catalog advertisement wait for both tracks. Format updates
+  publish a new initialization generation before advertising that generation.
+  MOQX 0.9.0 still has a Lite cancellation/late-group-FIN defect: a receiver
+  cancelling an initialization subscription can lose its whole connection.
+  Cross-profile Lite initialization is not release-certified until that upstream
+  fix is consumed; do not substitute an arbitrary cancellation delay.
 
   With `inbound_subscriptions: :controlled`, typed MOQX requests are surfaced
   as `{:subscription_requested, request}` parent notifications. The parent
@@ -188,6 +194,8 @@ defmodule Membrane.MOQX.Sink do
           init_track_name: nil,
           media_track: nil,
           ready?: false,
+          media_ready?: false,
+          init_ready?: true,
           pending_notification: nil,
           queued_buffers: [],
           eos_pending?: false,
@@ -352,10 +360,10 @@ defmodule Membrane.MOQX.Sink do
             init_track,
             init_name,
             media_track,
-            ready?
+            {ready?, initialization_ready?(state, init_track)}
           )
 
-        if ready? do
+        if pad_state.ready? do
           publish_prepared_track(pad, pad_state, pad_state.pending_notification, state)
         else
           {[], put_in(state, [:pads, pad], pad_state)}
@@ -388,10 +396,14 @@ defmodule Membrane.MOQX.Sink do
             init_track,
             init_name,
             media_track,
-            true
+            {true, initialization_ready?(state, init_track)}
           )
 
-        publish_prepared_track(pad, pad_state, pad_state.pending_notification, state)
+        if pad_state.ready? do
+          publish_prepared_track(pad, pad_state, pad_state.pending_notification, state)
+        else
+          {[], put_in(state, [:pads, pad], pad_state)}
+        end
 
       {:error, reason} ->
         raise "failed to accept reactive MOQX track: #{inspect(reason)}"
@@ -405,7 +417,7 @@ defmodule Membrane.MOQX.Sink do
          init_track,
          init_name,
          media_track,
-         ready?
+         {ready?, init_ready?}
        ) do
     %{
       pad_state
@@ -413,7 +425,9 @@ defmodule Membrane.MOQX.Sink do
         init_track: init_track,
         init_track_name: init_name,
         media_track: media_track,
-        ready?: ready?,
+        ready?: ready? and init_ready?,
+        media_ready?: ready?,
+        init_ready?: init_ready?,
         pending_notification: {:track_ready, pad, pad_state.options.track_name}
     }
   end
@@ -449,6 +463,8 @@ defmodule Membrane.MOQX.Sink do
             init_track: init_track,
             init_track_name: init_name,
             generation: generation,
+            init_ready?: initialization_ready?(state, init_track),
+            ready?: pad_state.media_ready? and initialization_ready?(state, init_track),
             pending_notification: {:track_updated, pad, pad_state.options.track_name, generation}
         }
 
@@ -505,26 +521,27 @@ defmodule Membrane.MOQX.Sink do
     {:ok, nil, nil}
   end
 
-  defp prepare_initialization(%{profile: :none}, _name, _track) do
-    {:ok, nil, nil}
-  end
-
-  defp prepare_initialization(state, _name, _track)
-       when state.protocol in [
-              :draft_16,
-              MOQX.Protocol.Draft16,
-              :moq_lite_05,
-              MOQX.Protocol.MOQLite05
-            ] do
+  defp prepare_initialization(%{profile: profile}, _name, _track)
+       when profile != :cloudflare_cmsf do
     {:ok, nil, nil}
   end
 
   defp prepare_initialization(state, name, track) do
-    with {:ok, init_track} <-
-           MOQX.add_track(state.client, state.publication, name, retention: :latest),
-         :ok <- publish_initialization(state, init_track, track) do
+    options = [retention: :latest, timescale: 1_000_000]
+
+    with {:ok, init_track} <- MOQX.add_track(state.client, state.publication, name, options),
+         :ok <- maybe_publish_initialization(state, init_track, track) do
       {:ok, init_track, name}
     end
+  end
+
+  defp initialization_ready?(state, init_track),
+    do: is_nil(init_track) or not ProtocolConventions.draft_16?(state.protocol)
+
+  defp maybe_publish_initialization(state, init_track, track) do
+    if initialization_ready?(state, init_track),
+      do: publish_initialization(state, init_track, track),
+      else: :ok
   end
 
   @impl true
@@ -881,22 +898,33 @@ defmodule Membrane.MOQX.Sink do
         {[], state}
 
       pad ->
+        pad_state = Map.fetch!(state.pads, pad)
+
         pad_state =
-          state.pads
-          |> Map.fetch!(pad)
-          |> Map.put(:ready?, true)
+          if pad_state.init_track == track do
+            :ok = publish_initialization(state, track, pad_state.track)
+            %{pad_state | init_ready?: true}
+          else
+            %{pad_state | media_ready?: true}
+          end
+
+        pad_state = %{pad_state | ready?: pad_state.media_ready? and pad_state.init_ready?}
 
         state = put_in(state, [:pads, pad], pad_state)
 
-        {actions, state} =
-          publish_prepared_track(
-            pad,
-            pad_state,
-            pad_state.pending_notification,
-            state
-          )
+        if pad_state.ready? do
+          {actions, state} =
+            publish_prepared_track(
+              pad,
+              pad_state,
+              pad_state.pending_notification,
+              state
+            )
 
-        flush_ready_pad(pad, actions, state)
+          flush_ready_pad(pad, actions, state)
+        else
+          {[], state}
+        end
     end
   end
 
@@ -961,7 +989,8 @@ defmodule Membrane.MOQX.Sink do
   defp published_track_pending?(track, state) do
     (track == state.catalog_track and not state.catalog_ready?) or
       Enum.any?(state.pads, fn {_pad, pad_state} ->
-        pad_state.media_track == track and not pad_state.ready?
+        (pad_state.media_track == track and not pad_state.media_ready?) or
+          (pad_state.init_track == track and not pad_state.init_ready?)
       end)
   end
 
@@ -971,7 +1000,7 @@ defmodule Membrane.MOQX.Sink do
 
   defp pad_for_published_track(state, track) do
     Enum.find_value(state.pads, fn {pad, pad_state} ->
-      if pad_state.media_track == track, do: pad
+      if pad_state.media_track == track or pad_state.init_track == track, do: pad
     end)
   end
 
@@ -1239,6 +1268,8 @@ defmodule Membrane.MOQX.Sink do
       group_id: 0,
       subgroup_id: 0,
       object_id: 0,
+      timestamp: if(ProtocolConventions.moq_lite_05?(state.protocol), do: 0),
+      end_of_group?: true,
       publisher_priority: state.publisher_priority,
       payload: track.initialization
     })
@@ -1343,6 +1374,8 @@ defmodule Membrane.MOQX.Sink do
             group_id: state.catalog_revision,
             subgroup_id: 0,
             object_id: 0,
+            timestamp:
+              if(ProtocolConventions.moq_lite_05?(state.protocol), do: state.catalog_revision),
             publisher_priority:
               ProtocolConventions.catalog_priority(state.protocol, state.publisher_priority),
             end_of_group?: true,
@@ -1364,7 +1397,7 @@ defmodule Membrane.MOQX.Sink do
   defp catalog_tracks(state) do
     state.pads
     |> Enum.filter(fn {_pad, pad_state} ->
-      not is_nil(pad_state.track) and !pad_state.ended?
+      not is_nil(pad_state.track) and pad_state.ready? and !pad_state.ended?
     end)
     |> Enum.sort_by(fn {_pad, pad_state} -> pad_state.options.track_name end)
     |> Enum.map(fn {_pad, pad_state} ->

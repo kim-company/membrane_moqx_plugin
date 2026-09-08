@@ -49,6 +49,42 @@ defmodule Membrane.MOQX.SinkTest do
 
   require Pad
 
+  test "Moqtail profile publishes inline initialization over the Cloudflare transport" do
+    namespace = ["live", "inline-cross-profile"]
+    relay = TestRelay.start(namespace)
+
+    format = %Membrane.MOQX.Track{
+      packaging: "cmaf",
+      initialization: "inline-init",
+      selection_params: %{"codec" => "avc1.42001e"}
+    }
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:source, %TestControlledSource{stream_format: format})
+          |> via_in(Pad.ref(:input, :video), options: [track_name: "video"])
+          |> child(:sink, %Sink{
+            endpoint: relay.endpoint,
+            protocol: :cloudflare_draft_14,
+            profile: :moqtail_cmsf,
+            namespace: namespace,
+            transport: TestRelay.transport(relay)
+          })
+      )
+
+    assert_pipeline_notified(pipeline, :sink, {:track_ready, _, "video"})
+    assert {:ok, objects} = TestRelay.capture(relay, ["catalog"])
+
+    assert %{"tracks" => [%{"initData" => encoded} = entry]} =
+             JSON.decode!(objects["catalog"].payload)
+
+    assert Base.decode64!(encoded) == "inline-init"
+    refute Map.has_key?(entry, "initTrack")
+    Testing.Pipeline.terminate(pipeline)
+    assert :ok = TestRelay.await_shutdown(relay)
+  end
+
   test "raw Cloudflare publication accepts canonical initialization without creating an init track" do
     namespace = ["live", "raw-initialization"]
     relay = TestRelay.start(namespace)
