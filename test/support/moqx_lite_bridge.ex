@@ -1,6 +1,6 @@
 defmodule Membrane.MOQX.TestLiteBridge do
   @moduledoc false
-  # A scoped semantic relay fixture, not a production relay. Two independent
+  # A scoped semantic relay fixture, not a production relay. Independent
   # server-side transport owners route actual client requests and groups.
   # Subscription IDs are translated; media bytes, timing deltas and FIN/RESET
   # remain the publisher's. No fixture-generated media or delivery grace delay.
@@ -25,12 +25,25 @@ defmodule Membrane.MOQX.TestLiteBridge do
   end
 
   def stop(relay) do
-    for task <- [relay.downstream, relay.upstream] do
+    tasks = Map.get(relay, :additional_downstreams, []) ++ [relay.downstream, relay.upstream]
+
+    for task <- tasks do
       send(task.pid, :stop)
       :ok = Task.await(task, 2_000)
     end
 
     :ok
+  end
+
+  def add_subscriber_endpoint(%{transport: {Support, options}} = relay) do
+    network = Keyword.fetch!(options, :network)
+    parent = self()
+
+    downstream =
+      Task.async(fn -> listen(parent, network, :downstream, relay.upstream.pid, []) end)
+
+    {endpoint(downstream),
+     Map.update(relay, :additional_downstreams, [downstream], &[downstream | &1])}
   end
 
   def disconnect_subscriber(relay, code) do
