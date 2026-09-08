@@ -1,9 +1,322 @@
 defmodule Membrane.MOQX.SubscriptionUpdateTest do
   use ExUnit.Case, async: true
-  alias Membrane.MOQX.Session
+  import Membrane.ChildrenSpec
+  import Membrane.Testing.Assertions
+
+  alias Membrane.MOQX.{
+    CatalogSource,
+    Session,
+    Sink,
+    Source,
+    TestControlledSource,
+    TestLiteBridge,
+    Track,
+    TrackOffer
+  }
+
+  alias Membrane.{Pad, Testing}
+  require Pad
   alias MOQX.Protocol.MOQLite05.{Codec, Messages}
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
+
+  test "CatalogSource routes updates to the selected pad and reports missing selections without crashing" do
+    relay = TestLiteBridge.start()
+    namespace = ["updates.hang"]
+
+    format = %Track{
+      packaging: "hang/legacy",
+      initialization: nil,
+      catalog_fields: %{"role" => "audio"},
+      selection_params: %{"codec" => "opus", "sampleRate" => 48_000, "numberOfChannels" => 2}
+    }
+
+    publisher =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:producer, %TestControlledSource{stream_format: format})
+          |> via_in(Pad.ref(:input, :media), options: [track_name: "audio", timescale: 1_000_000])
+          |> child(:publisher, %Sink{
+            endpoint: relay.publisher_endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: relay.transport
+          })
+      )
+
+    assert_pipeline_notified(publisher, :publisher, {:track_ready, _, "audio"})
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:catalog, %CatalogSource{
+            endpoint: relay.subscriber_endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: relay.transport
+          })
+      )
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:track_available, %TrackOffer{track_ref: track}}
+    )
+
+    pad = Pad.ref(:output, :selected)
+
+    Testing.Pipeline.execute_actions(pipeline,
+      spec:
+        get_child(:catalog)
+        |> via_out(pad, options: [track: track])
+        |> child(:consumer, Testing.Sink)
+    )
+
+    assert_pipeline_notified(publisher, :publisher, {:subscriber_joined, "audio", _, 1})
+
+    Testing.Pipeline.notify_child(
+      publisher,
+      :producer,
+      {:publish,
+       [
+         %Membrane.Buffer{
+           payload: "before-update",
+           pts: 1_000_000,
+           metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+         }
+       ]}
+    )
+
+    assert_sink_stream_format(pipeline, :consumer, %Track{})
+    assert_sink_buffer(pipeline, :consumer, %Membrane.Buffer{payload: "before-update"})
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :catalog,
+      {:update_subscription, pad, :selected, [priority: 17]}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:track_source, ^track, {:subscription_update_result, :selected, :ok}}
+    )
+
+    missing = Pad.ref(:output, :missing)
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :catalog,
+      {:update_subscription, missing, :missing, [priority: 23]}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:subscription_update_result, :missing, {:error, :unknown_selection}}
+    )
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :catalog,
+      {:update_subscription, pad, :invalid, [priority: 256]}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:track_source, ^track,
+       {:subscription_update_result, :invalid, {:error, :invalid_priority}}}
+    )
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :catalog,
+      {:update_subscription, pad, :again, [priority: 23]}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:track_source, ^track, {:subscription_update_result, :again, :ok}}
+    )
+
+    Testing.Pipeline.notify_child(
+      publisher,
+      :producer,
+      {:publish,
+       [
+         %Membrane.Buffer{
+           payload: "after-update",
+           pts: 2_000_000,
+           metadata: %{moqx: %Membrane.MOQX.Unit{group_end?: true}}
+         }
+       ]}
+    )
+
+    assert_sink_buffer(pipeline, :consumer, %Membrane.Buffer{payload: "after-update"})
+    Testing.Pipeline.execute_actions(pipeline, remove_children: :consumer)
+    assert_pipeline_notified(publisher, :publisher, {:subscriber_left, "audio", _, 0})
+
+    Testing.Pipeline.notify_child(
+      pipeline,
+      :catalog,
+      {:update_subscription, pad, :removed, [priority: 17]}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:subscription_update_result, :removed, {:error, :unknown_selection}}
+    )
+
+    assert :ok = Testing.Pipeline.terminate(pipeline)
+    assert :ok = Testing.Pipeline.terminate(publisher)
+    assert :ok = TestLiteBridge.stop(relay)
+  end
+
+  test "standalone and shared Sources report correlated local update results without losing their subscription" do
+    for mode <- [:standalone, :shared] do
+      peer = start_peer(1)
+      transport = {Support, network: peer.network, profile: :moq_lite_05}
+
+      session =
+        if mode == :shared do
+          {:ok, session} =
+            Session.start_link(
+              endpoint: peer.endpoint,
+              protocol: :moq_lite_05,
+              transport: transport
+            )
+
+          session
+        end
+
+      pipeline =
+        Testing.Pipeline.start_link_supervised!(
+          spec:
+            child(:source, %Source{
+              endpoint: peer.endpoint,
+              session: session,
+              protocol: :moq_lite_05,
+              transport: transport,
+              track: %MOQX.TrackRef{namespace: ["updates"], track: "video"},
+              stream_format: %Track{packaging: "opus", initialization: nil}
+            })
+            |> child(:consumer, Testing.Sink)
+        )
+
+      assert_sink_stream_format(pipeline, :consumer, %Track{})
+
+      Testing.Pipeline.notify_child(
+        pipeline,
+        :source,
+        {:update_subscription, :change, [priority: 17]}
+      )
+
+      assert_pipeline_notified(pipeline, :source, {:subscription_update_result, :change, :ok})
+
+      assert_wire_update(peer, 0, %Messages.SubscribeUpdate{
+        subscriber_priority: 17,
+        subscriber_ordered: false,
+        subscriber_max_latency: 0
+      })
+
+      Testing.Pipeline.notify_child(
+        pipeline,
+        :source,
+        {:update_subscription, :invalid, [priority: 256]}
+      )
+
+      assert_pipeline_notified(
+        pipeline,
+        :source,
+        {:subscription_update_result, :invalid, {:error, :invalid_priority}}
+      )
+
+      Testing.Pipeline.notify_child(
+        pipeline,
+        :source,
+        {:update_subscription, :next, [priority: 23]}
+      )
+
+      assert_pipeline_notified(pipeline, :source, {:subscription_update_result, :next, :ok})
+
+      assert_wire_update(peer, 0, %Messages.SubscribeUpdate{
+        subscriber_priority: 23,
+        subscriber_ordered: false,
+        subscriber_max_latency: 0
+      })
+
+      assert :ok = Testing.Pipeline.terminate(pipeline)
+      if session, do: Session.close(session)
+      send(peer.task.pid, :stop)
+      assert :ok = Task.await(peer.task)
+    end
+  end
+
+  test "Sources distinguish local admission from typed peer update rejection and acknowledgement" do
+    for mode <- [:standalone, :shared] do
+      peer = start_draft16_peer()
+      transport = {Support, network: peer.network, profile: :draft_16}
+
+      session =
+        if mode == :shared do
+          {:ok, session} =
+            Session.start_link(endpoint: peer.endpoint, protocol: :draft_16, transport: transport)
+
+          session
+        end
+
+      track = %MOQX.TrackRef{namespace: ["updates"], track: "video"}
+
+      pipeline =
+        Testing.Pipeline.start_link_supervised!(
+          spec:
+            child(:source, %Source{
+              endpoint: peer.endpoint,
+              session: session,
+              protocol: :draft_16,
+              transport: transport,
+              track: track,
+              stream_format: %Track{packaging: "opus", initialization: nil}
+            })
+            |> child(:consumer, Testing.Sink)
+        )
+
+      assert_sink_stream_format(pipeline, :consumer, %Track{})
+
+      Testing.Pipeline.notify_child(
+        pipeline,
+        :source,
+        {:update_subscription, :rejected, [priority: 17]}
+      )
+
+      assert_pipeline_notified(pipeline, :source, {:subscription_update_result, :rejected, :ok})
+
+      assert_pipeline_notified(
+        pipeline,
+        :source,
+        {:subscription_update_failed, ^track,
+         %MOQX.ProtocolError{operation: :update_subscription, code: 8}}
+      )
+
+      Testing.Pipeline.notify_child(
+        pipeline,
+        :source,
+        {:update_subscription, :accepted, [priority: 23]}
+      )
+
+      assert_pipeline_notified(pipeline, :source, {:subscription_update_result, :accepted, :ok})
+      assert_pipeline_notified(pipeline, :source, {:subscription_updated, ^track, []})
+      assert :ok = Testing.Pipeline.terminate(pipeline)
+      if session, do: Session.close(session)
+      send(peer.task.pid, :stop)
+      assert :ok = Task.await(peer.task)
+    end
+  end
 
   test "draft-16 update rejection and acknowledgement reach the owner without ending its subscription" do
     peer = start_draft16_peer()
@@ -110,7 +423,7 @@ defmodule Membrane.MOQX.SubscriptionUpdateTest do
     assert_receive {:wire_update, ^id, ^update}, 2_000
   end
 
-  defp start_peer do
+  defp start_peer(count \\ 2) do
     {:ok, network} = Support.start_network()
     parent = self()
 
@@ -127,7 +440,7 @@ defmodule Membrane.MOQX.SubscriptionUpdateTest do
         {:ok, ^setup_bytes, ctx} = Transport.recv_stream(ctx, setup, byte_size(setup_bytes))
 
         {ctx, streams} =
-          Enum.reduce(0..1, {ctx, %{}}, fn id, {ctx, streams} ->
+          Enum.reduce(0..(count - 1), {ctx, %{}}, fn id, {ctx, streams} ->
             {:ok, metadata, ctx} = Transport.accept_stream(ctx, conn, [], 2_000)
             {:ok, stream, ctx} = Transport.accept_stream(ctx, conn, [], 2_000)
 

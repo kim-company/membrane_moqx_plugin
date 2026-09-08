@@ -109,6 +109,28 @@ defmodule Membrane.MOQX.Source do
 
   def handle_info(_message, _ctx, state), do: {[], state}
 
+  @impl true
+  def handle_parent_notification({:update_subscription, request_id, options}, _ctx, state) do
+    result =
+      cond do
+        state.ended? or is_nil(state.subscription) ->
+          {:error, :unknown_subscription}
+
+        not state.accepted? ->
+          {:error, :subscription_not_ready}
+
+        is_pid(state.session) ->
+          Session.update_subscription(state.session, state.subscription, options)
+
+        true ->
+          MOQX.update_subscription(state.client, state.subscription, options)
+      end
+
+    {[notify_parent: {:subscription_update_result, request_id, result}], state}
+  end
+
+  def handle_parent_notification(_notification, _ctx, state), do: {[], state}
+
   defp handle_event(
          %MOQX.Event.SubscriptionAccepted{
            subscription: subscription,
@@ -169,6 +191,22 @@ defmodule Membrane.MOQX.Source do
          %{subscription: subscription} = state
        ) do
     consume_or_queue({:subgroup_ended, event}, state)
+  end
+
+  defp handle_event(
+         %MOQX.Event.SubscriptionUpdated{subscription: subscription, parameters: parameters},
+         _ctx,
+         %{subscription: subscription} = state
+       ) do
+    {[notify_parent: {:subscription_updated, state.track, parameters}], state}
+  end
+
+  defp handle_event(
+         %MOQX.Event.SubscriptionUpdateFailed{subscription: subscription, error: error},
+         _ctx,
+         %{subscription: subscription} = state
+       ) do
+    {[notify_parent: {:subscription_update_failed, state.track, error}], state}
   end
 
   defp handle_event(
