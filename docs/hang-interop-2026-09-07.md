@@ -219,6 +219,15 @@ The full suite passed 94 tests with eight opt-in integrations excluded (seed
 
 ## Still unverified or incomplete
 
+Discovery/catalog composition addendum (2026-09-08): the native HANG roundtrip
+now verifies that media EOS removes its catalog offer while a fresh discovery
+snapshot still sees the broadcast. Only closing the publisher produces
+`BroadcastWithdrawn` on both the original and late discovery handles; explicit
+cancellation then yields scoped `DiscoveryDone` events. The extended test passed
+on the pinned local relay (seed 89135, 5.3 seconds) and public anonymous relay
+(seed 118207, 6.1 seconds), with TLS verification and no EOS grace sleeps.
+Strict Credo and formatting/diff checks passed. No production change was needed.
+
 Selected-media rejection coverage (2026-09-08): selecting a caller-described
 track through CatalogSource and receiving a real Lite subscription RESET
 forwards `{:track_source, ref, {:subscription_failed, ref, protocol_error}}`

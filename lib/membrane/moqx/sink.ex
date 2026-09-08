@@ -16,6 +16,10 @@ defmodule Membrane.MOQX.Sink do
   Use `Membrane.MOQX.Hang.Legacy` for Opus/H.264 legacy framing, or
   `Membrane.MOQX.Hang.CMAF` with `TrackAdapter.ToTrack` for H.264/AAC CMAF.
   These are explicit adapters; this Sink does not encode media or add framing.
+  For HANG over Lite, media EOS withdraws that track from the catalog, not the
+  broadcast itself. Even after its last media track ends, the publication
+  remains discoverable until the Sink closes. Catalog track-offer withdrawal
+  and Session broadcast withdrawal are distinct notifications/lifecycles.
 
   With `:none`, canonical initialization remains caller-owned metadata; no
   catalog or initialization track is synthesized. Current CMSF publication

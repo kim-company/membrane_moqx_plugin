@@ -121,8 +121,29 @@ defmodule Membrane.MOQX.Integration.LiteRoundtripTest do
 
     assert_end_of_stream(subscriber, :sink, :input, @timeout)
     assert_pipeline_notified(subscriber, :catalog, {:track_unavailable, ^offer}, @timeout)
+
+    # Track withdrawal is not broadcast departure. A fresh discovery snapshot
+    # must still find the publication after its last media track reaches EOS.
+    {:ok, late_discovery} = Session.discover(discovery_session, "")
+
+    assert_receive {:moqx_session, ^discovery_session,
+                    %MOQX.Event.BroadcastAvailable{discovery: ^late_discovery, path: ^path}},
+                   @timeout
+
     Testing.Pipeline.terminate(subscriber)
     Testing.Pipeline.terminate(publisher)
+
+    for handle <- [discovery, late_discovery] do
+      assert_receive {:moqx_session, ^discovery_session,
+                      %MOQX.Event.BroadcastWithdrawn{discovery: ^handle, path: ^path}},
+                     @timeout
+
+      assert :ok = Session.cancel_discovery(discovery_session, handle)
+
+      assert_receive {:moqx_session, ^discovery_session,
+                      %MOQX.Event.DiscoveryDone{discovery: ^handle, reason: :cancelled}},
+                     @timeout
+    end
   end
 
   test "a complete plugin Lite roundtrip delivers the final payload and PTS before EOS" do
