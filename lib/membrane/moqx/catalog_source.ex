@@ -7,6 +7,12 @@ defmodule Membrane.MOQX.CatalogSource do
   unadvertised track by supplying its canonical stream format in pad options.
   Unlinking an output removes its Source and cancels that media subscription,
   not the catalog subscription. The parent can select the track again later.
+  Selected Source notifications are forwarded as
+  `{:track_source, track_ref, notification}`. A selected Source failure is not
+  isolated within this Bin: it terminates the CatalogSource, including other
+  selections. Parents requiring pipeline survival must isolate this Bin and
+  affected downstream consumers in crash groups; static-pad consumers can fail
+  when their upstream disappears during linking. There is no per-track retry.
 
   Select `profile` independently from `protocol`: `:moqtail_cmsf` defaults to
   `catalog`, `:cloudflare_cmsf` to `.catalog`, and `:hang` to `catalog.json`.

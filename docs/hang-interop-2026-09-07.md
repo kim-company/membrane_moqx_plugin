@@ -219,6 +219,19 @@ The full suite passed 94 tests with eight opt-in integrations excluded (seed
 
 ## Still unverified or incomplete
 
+Selected-media rejection coverage (2026-09-08): selecting a caller-described
+track through CatalogSource and receiving a real Lite subscription RESET
+forwards `{:track_source, ref, {:subscription_failed, ref, protocol_error}}`
+before the CatalogSource terminates. The current Bin does not isolate child
+Sources. An initial test isolated only the catalog: its static-pad consumer
+then crashed on unlink during setup. Isolating both in parent-managed crash
+groups preserved the outer pipeline; the regression passed four consecutive
+runs. This documents existing failure propagation, not per-track recovery or
+survival of sibling selections. Changing that fault boundary requires a
+maintainer design decision.
+Full-suite verification passed 95 tests with eight opt-in integrations excluded
+(seed 746932), and strict Credo passed.
+
 - Reverse legacy Opus/H.264 and reverse CMAF receive/decode are verified above;
   real-time playback ordering, synchronization and loss recovery are not
   provided by the core Source or framing adapters.

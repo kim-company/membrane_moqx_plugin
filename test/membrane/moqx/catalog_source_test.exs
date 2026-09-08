@@ -19,6 +19,67 @@ defmodule Membrane.MOQX.CatalogSourceTest do
 
   require Pad
 
+  test "forwards rejected selected media errors before terminating its catalog crash group" do
+    alias Membrane.MOQX.{Sink, TestLiteBridge}
+    relay = TestLiteBridge.start(reject_track: "blocked")
+    namespace = ["room", "media-rejected.hang"]
+
+    publisher =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          child(:publisher, %Sink{
+            endpoint: relay.publisher_endpoint,
+            protocol: :moq_lite_05,
+            profile: :hang,
+            namespace: namespace,
+            transport: relay.transport
+          })
+      )
+
+    assert_pipeline_notified(publisher, :publisher, {:publication_ready, ^namespace})
+
+    pipeline =
+      Testing.Pipeline.start_link_supervised!(
+        spec:
+          {child(:catalog, %CatalogSource{
+             endpoint: relay.subscriber_endpoint,
+             protocol: :moq_lite_05,
+             profile: :hang,
+             namespace: namespace,
+             transport: relay.transport
+           }), group: :catalog_reader, crash_group_mode: :temporary}
+      )
+
+    assert_pipeline_notified(pipeline, :catalog, :catalog_ready)
+    ref = %MOQX.TrackRef{namespace: namespace, track: "blocked"}
+
+    # Explicitly described selection is a public CatalogSource operation even
+    # when the current catalog does not advertise this address.
+    Testing.Pipeline.execute_actions(pipeline,
+      spec:
+        {get_child(:catalog)
+         |> via_out(Pad.ref(:output, :blocked),
+           options: [track: ref, stream_format: %Track{packaging: "opus", initialization: nil}]
+         )
+         |> child(:consumer, Testing.Sink), group: :selected_media, crash_group_mode: :temporary}
+    )
+
+    assert_pipeline_notified(
+      pipeline,
+      :catalog,
+      {:track_source, ^ref,
+       {:subscription_failed, ^ref,
+        %MOQX.ProtocolError{protocol: :moq_lite_05, operation: :subscribe, code: 0x10}}}
+    )
+
+    assert_child_terminated(pipeline, :catalog)
+    assert_child_terminated(pipeline, :consumer)
+    assert Process.alive?(pipeline)
+    Testing.Pipeline.terminate(pipeline)
+    Testing.Pipeline.terminate(publisher)
+    assert :ok = TestLiteBridge.stop(relay)
+  end
+
   test "reports rejected HANG catalog subscription and removes the failed catalog child" do
     alias Membrane.MOQX.{Sink, TestLiteBridge}
     relay = TestLiteBridge.start(reject_track: "catalog.json")
