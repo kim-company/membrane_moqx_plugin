@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mise_bin="$HOME/.local/bin/mise"
+
+run_step() {
+  local label="$1"
+  shift
+  printf '\n==> %s\n' "$label"
+  time "$@"
+}
+
+install_system_packages() {
+  local packages=(build-essential ca-certificates cmake curl git ninja-build perl pkg-config unzip)
+  local missing=()
+  local package
+
+  for package in "${packages[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -Fq 'install ok installed'; then
+      missing+=("$package")
+    fi
+  done
+
+  if ((${#missing[@]})); then
+    sudo apt-get update
+    sudo apt-get install -y "${missing[@]}"
+  else
+    echo "System packages already installed"
+  fi
+}
+
+install_mise() {
+  if [[ ! -x "$mise_bin" ]]; then
+    mkdir -p "$(dirname "$mise_bin")"
+    curl -fsSL https://mise.run | MISE_VERSION=v2026.9.8 MISE_INSTALL_PATH="$mise_bin" sh
+  else
+    echo "mise already installed"
+  fi
+}
+
+configure_login_shell() {
+  local marker="# membrane_moqx_plugin mise activation"
+
+  touch "$HOME/.bash_profile"
+  if ! grep -Fqx "$marker" "$HOME/.bash_profile"; then
+    cat >>"$HOME/.bash_profile" <<'EOF'
+
+# membrane_moqx_plugin mise activation
+if [[ -x "$HOME/.local/bin/mise" ]]; then
+  eval "$("$HOME/.local/bin/mise" activate bash)"
+fi
+EOF
+  fi
+}
+
+run_step "Checking system packages" install_system_packages
+run_step "Installing mise" install_mise
+run_step "Installing pinned Erlang and Elixir" "$mise_bin" install --cd "$repo_root"
+run_step "Installing Hex" "$mise_bin" exec --cd "$repo_root" -- mix local.hex --force
+run_step "Installing locked Mix dependencies" "$mise_bin" exec --cd "$repo_root" -- mix deps.get --check-locked
+run_step "Compiling dependencies and project" "$mise_bin" exec --cd "$repo_root" -- mix compile
+configure_login_shell
+
+echo "Orb setup complete"
