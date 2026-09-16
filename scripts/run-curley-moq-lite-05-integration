@@ -10,4 +10,4 @@ sleep 3
 
 MOQX_LITE_ENDPOINT=moql://localhost:4463/ \
 MOQX_LITE_CA_FILE="$root/.tmp/integration-certs/ca.pem" \
-  mix test --include integration --only moq_lite_05 test/integration
+  mix test --only moq_lite_05 test/integration

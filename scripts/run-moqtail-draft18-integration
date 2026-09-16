@@ -10,5 +10,5 @@ sleep 3
 
 MOQX_DRAFT18_ENDPOINT=moqt://localhost:4473 \
 MOQX_DRAFT18_CA_FILE="$root/.tmp/integration-certs/ca.pem" \
-  mix test --include integration --only moqtail_local \
+  mix test --only moqtail_local \
   test/integration/moqtail_draft_18_test.exs
