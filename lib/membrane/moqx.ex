@@ -9,10 +9,10 @@ defmodule Membrane.MOQX do
 
   ## Supported boundaries
 
-  Built-in protocol selections are `:moq_lite_05`, `:draft_16`, and
-  `:cloudflare_draft_14`, over native QUIC through MOQX. Selection is explicit;
+  Built-in protocol selections are standard MOQT `:draft_18` and independent
+  MoQ Lite `:moq_lite_05`, over native QUIC through MOQX. Selection is explicit;
   an endpoint does not negotiate a different implementation automatically.
-  Draft-18 and WebTransport are not implemented by this plugin's MOQX 0.10.0
+  Draft-14, draft-16, and WebTransport are not supported by the MOQX 0.11.0
   baseline.
 
   * `Membrane.MOQX.Source` receives one known track with caller-supplied format.
@@ -40,7 +40,7 @@ defmodule Membrane.MOQX do
 
   ## Pinned capability matrix
 
-  This matrix uses published MOQX 0.10.0, Lite `draft-lcurley-moq-lite-05`,
+  This matrix uses published MOQX 0.11.0, Lite `draft-lcurley-moq-lite-05`,
   and moq-dev/moq commit
   `fd477082c43c3c0738fb62d077d85ea078f10045`. Test names below refer to repository
   ExUnit modules; the dated evidence report contains native/browser runs.
@@ -59,7 +59,7 @@ defmodule Membrane.MOQX do
   | Empty-group HANG codec-epoch discontinuity | Source/Sink Event.EmptyGroup; EmptyGroupSourceTest, EmptyGroupRoundtripTest, HangLegacyTest, HangCMAFTest | Implemented; explicit decoder reset/ordering ownership remains downstream |
   | Runtime subscription updates | Session.update_subscription, Source parent command, CatalogSource pad command; SubscriptionUpdateTest checks ownership, stale/invalid decisions, wire options and nonterminal peer rejection | Implemented; local send admission is not a peer acknowledgement |
   | Lite immutable track metadata, priority/order/latency and group ranges | TrackInfo reception, Sink pad options and subscription/update options through MOQX | Supported options are version-specific; invalid options retain upstream errors |
-  | Other Lite surfaces: FETCH, bandwidth PROBE, GOAWAY and datagram media | Not exposed by MOQX 0.10.0's Lite operations/delivery capabilities | Unsupported here; no emulation or silent fallback |
+  | Other Lite surfaces: FETCH, bandwidth PROBE, GOAWAY and datagram media | Not exposed by MOQX 0.11.0's Lite operations/delivery capabilities | Unsupported here; no emulation or silent fallback |
   | Alternative bindings: WebTransport, Qmux/TCP/TLS and WebSocket | Plugin connections use native QUIC; browser proof uses a reference peer through a relay | Unsupported plugin transports; browser compatibility does not imply browser-native plugin transport |
   | LOC, other codecs and universal browser playback | Opaque transport/recognized catalog metadata is not decoder support | Unsupported by supplied adapters |
 
@@ -72,9 +72,10 @@ defmodule Membrane.MOQX do
   ## Delivery and verification limits
 
   Local acceptance, subscription readiness and EOS are not end-to-end delivery
-  acknowledgements. Immediate final-buffer/EOS has lost payloads in observed
-  Cloudflare draft-14 and draft-16 workflows. Aggregate subscriber demand is
-  not receiver flow control or a bounded-memory delivery guarantee.
+  acknowledgements. Historical draft-14 and draft-16 relay results are retained
+  in the compatibility report, but those protocols are no longer selectable.
+  Aggregate subscriber demand is not receiver flow control or a bounded-memory
+  delivery guarantee.
 
   Verification includes complete raw and catalog-selected HANG plugin
   Source/Sink roundtrips through local and public Lite relays, reference-browser

@@ -7,6 +7,7 @@ defmodule Membrane.MOQX.Integration.LiteMetadataProvisioningTest do
   require Pad
 
   @moduletag :integration
+  @moduletag :moq_lite_05
   @timeout 15_000
 
   test "absent-track metadata provisioning requires separate admission and drains final media" do

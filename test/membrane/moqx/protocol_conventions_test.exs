@@ -18,16 +18,13 @@ defmodule Membrane.MOQX.ProtocolConventionsTest do
     }
   }
 
-  test "draft-16 resolves Moqtail publication conventions literally" do
-    assert ProtocolConventions.catalog_track_name(:draft_16, nil) == "catalog"
-    assert ProtocolConventions.initialization_mode(:draft_16) == :inline
-
-    assert ProtocolConventions.track_options(:draft_16, :all, :datagram) ==
+  test "draft-18 resolves Moqtail publication conventions literally" do
+    assert ProtocolConventions.track_options(:draft_18, :all, :datagram) ==
              [retention: :all, delivery: :datagram]
 
-    assert ProtocolConventions.catalog_priority(:draft_16, 127) == 0
+    assert ProtocolConventions.catalog_priority(:draft_18, 127) == 0
 
-    assert ProtocolConventions.catalog(:draft_16, ["live", "camera"], [
+    assert ProtocolConventions.catalog(:moqtail_cmsf, ["live", "camera"], [
              {"video", nil, @track}
            ]) == %{
              "version" => 1,
@@ -47,16 +44,16 @@ defmodule Membrane.MOQX.ProtocolConventionsTest do
            }
   end
 
-  test "Cloudflare draft-14 keeps its deployed catalog and initialization conventions" do
-    assert ProtocolConventions.catalog_track_name(:cloudflare_draft_14, nil) == ".catalog"
-    assert ProtocolConventions.initialization_mode(:cloudflare_draft_14) == :separate_track
+  test "the Cloudflare CMSF profile keeps its deployed catalog and initialization conventions" do
+    assert ProtocolConventions.profile_catalog_track_name(:cloudflare_cmsf, :none, nil) ==
+             ".catalog"
 
-    assert ProtocolConventions.track_options(:cloudflare_draft_14, :live, :subgroup) ==
-             [retention: :live]
+    assert ProtocolConventions.track_options(:draft_18, :live, :subgroup) ==
+             [retention: :live, delivery: :subgroup]
 
-    assert ProtocolConventions.catalog_priority(:cloudflare_draft_14, 127) == 127
+    assert ProtocolConventions.catalog_priority(:draft_18, 127) == 0
 
-    assert ProtocolConventions.catalog(:cloudflare_draft_14, ["live", "camera"], [
+    assert ProtocolConventions.catalog(:cloudflare_cmsf, ["live", "camera"], [
              {"video", "video.init", @track}
            ]) == %{
              "version" => 1,
@@ -85,9 +82,6 @@ defmodule Membrane.MOQX.ProtocolConventionsTest do
   test "MoQ Lite draft-05 uses exact tracks with no catalog or initialization track" do
     assert ProtocolConventions.moq_lite_05?(:moq_lite_05)
     assert ProtocolConventions.moq_lite_05?(MOQX.Protocol.MOQLite05)
-    assert ProtocolConventions.catalog_track_name(:moq_lite_05, nil) == nil
-    assert ProtocolConventions.initialization_mode(:moq_lite_05) == :none
-    assert ProtocolConventions.catalog(:moq_lite_05, ["live"], [{"video", nil, @track}]) == nil
 
     assert ProtocolConventions.track_options(
              :moq_lite_05,
@@ -103,10 +97,5 @@ defmodule Membrane.MOQX.ProtocolConventionsTest do
              publisher_priority: 17,
              publisher_max_latency: 1_000
            ]
-  end
-
-  test "an explicit catalog track override wins without endpoint inference" do
-    assert ProtocolConventions.catalog_track_name(:draft_16, ".custom") == ".custom"
-    assert ProtocolConventions.catalog_track_name(:cloudflare_draft_14, "custom") == "custom"
   end
 end

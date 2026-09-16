@@ -15,7 +15,7 @@ defmodule Membrane.MOQX.Integration.CloudflareSourceTest do
 
   test "requests an absent track, provisions it through the Sink, and receives it through Cloudflare" do
     endpoint =
-      System.get_env("MOQX_ENDPOINT", "moqt://draft-14.cloudflare.mediaoverquic.com:443")
+      System.get_env("MOQX_ENDPOINT", "moqt://draft-18.cloudflare.mediaoverquic.com:443")
 
     authorization = authorization()
     namespace = ["membrane-moqx", "source-live-#{System.unique_integer([:positive])}"]
@@ -28,7 +28,7 @@ defmodule Membrane.MOQX.Integration.CloudflareSourceTest do
         spec:
           child(:sink, %Sink{
             endpoint: endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             profile: :cloudflare_cmsf,
             namespace: namespace,
             authorization: authorization,
@@ -44,7 +44,7 @@ defmodule Membrane.MOQX.Integration.CloudflareSourceTest do
         spec:
           child(:source, %Source{
             endpoint: endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             track: track_ref,
             stream_format: stream_format,
             authorization: authorization,

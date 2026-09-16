@@ -1,0 +1,58 @@
+services:
+  certs:
+    image: alpine:3.20
+    working_dir: /certs
+    volumes:
+      - ./.tmp/integration-certs:/certs
+      - ./scripts:/scripts:ro
+    command: [sh, -eu, -c, "apk add --no-cache openssl >/dev/null && sh /scripts/gen-loopback-certs.sh /certs"]
+
+  moqtail-draft18-relay:
+    build:
+      context: .
+      dockerfile: docker/relays/moqtail/Dockerfile
+      args:
+        MOQTAIL_REF: 0e265d8bf133f86e17472c59f14ca7dc62032900
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    command:
+      - /usr/local/bin/moqtail-relay
+      - --host
+      - 0.0.0.0
+      - --port
+      - "4433"
+      - --cert-file
+      - /certs/server.pem
+      - --key-file
+      - /certs/server-key.pem
+    volumes:
+      - ./.tmp/integration-certs:/certs:ro
+    ports:
+      - "4473:4433/udp"
+
+  curley-moq-lite-05-relay:
+    build:
+      context: .
+      dockerfile: docker/relays/curley/Dockerfile
+      args:
+        MOQ_REF: fd477082c43c3c0738fb62d077d85ea078f10045
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    command:
+      - /usr/local/bin/moq-relay
+      - --server-bind
+      - 0.0.0.0:443
+      - --server-version
+      - moq-lite-05
+      - --tls-cert
+      - /certs/server.pem
+      - --tls-key
+      - /certs/server-key.pem
+      - --auth-public
+      - ""
+    volumes:
+      - ./.tmp/integration-certs:/certs:ro
+    ports:
+      - "4463:443/udp"

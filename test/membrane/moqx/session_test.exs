@@ -102,7 +102,7 @@ defmodule Membrane.MOQX.SessionTest do
     {:ok, session} =
       Session.start_link(
         endpoint: publisher.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         transport: TestPublisher.transport(publisher)
       )
 

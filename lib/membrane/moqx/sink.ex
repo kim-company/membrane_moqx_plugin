@@ -31,7 +31,7 @@ defmodule Membrane.MOQX.Sink do
   Moqtail CMSF uses inline `initData`, Cloudflare CMSF uses a separate retained
   initialization track, and HANG uses its decoder/container metadata. Transport
   selection controls delivery mechanics, including Lite timestamps and completed
-  groups. On draft-16, separate initialization waits for relay track readiness;
+  groups. Separate initialization waits for relay track readiness;
   media readiness and catalog advertisement wait for both tracks. Format updates
   publish a new initialization generation before advertising that generation.
   While readiness is pending, subsequent stream formats, buffers and EOS are
@@ -40,7 +40,7 @@ defmodule Membrane.MOQX.Sink do
   and applies EOS only after all earlier events. Identical consecutive formats
   do not create a new generation. This is an in-memory queue, not backpressure;
   upstream flow control remains the application's responsibility.
-  MOQX 0.10.0 isolates late initialization-subscription replies and group tails;
+  MOQX isolates late initialization-subscription replies and group tails;
   no arbitrary cancellation delay is added here.
 
   With `inbound_subscriptions: :controlled`, typed MOQX requests are surfaced
@@ -74,9 +74,9 @@ defmodule Membrane.MOQX.Sink do
   A parent can finish one accepted subscriber without withdrawing the track by
   sending `{:finish_subscription, request_handle, options}`.
 
-  Draft-16 publication waits for namespace and per-track readiness and supports
-  subgroup or datagram delivery per pad. Cloudflare draft-14 uses subgroup-only
-  publication. These transport choices do not select a catalog profile:
+  Draft-18 publication waits for namespace and per-track readiness and supports
+  subgroup or datagram delivery per pad. These transport choices do not select
+  a catalog profile:
   `:moqtail_cmsf` embeds initialization in its catalog, while `:cloudflare_cmsf`
   uses separate initialization tracks and defaults to `.catalog`. Catalog
   profiles refresh their retained catalog for late discovery; `:none` creates
@@ -113,9 +113,8 @@ defmodule Membrane.MOQX.Sink do
   separate verification gates.
 
   Input EOS finishes the track through MOQX; it does not wait for an application
-  acknowledgement that every subscriber received the final buffer. Observed
-  Cloudflare draft-14/16 immediate-EOS loss remains a compatibility limitation
-  (see `Membrane.MOQX`). Do not treat successful local publication or subscriber
+  acknowledgement that every subscriber received the final buffer. Do not treat
+  successful local publication or subscriber
   readiness as delivery certification. This element does not add a delivery
   grace delay, encode/mux payloads, or pace them by PTS.
   """
@@ -381,7 +380,7 @@ defmodule Membrane.MOQX.Sink do
 
     case MOQX.add_track(state.client, state.publication, options.track_name, track_options) do
       {:ok, media_track} ->
-        ready? = not ProtocolConventions.draft_16?(state.protocol)
+        ready? = not ProtocolConventions.draft_18?(state.protocol)
 
         pad_state =
           prepared_pad_state(
@@ -464,7 +463,7 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp approved_reactive_request(state, track_name) do
-    if ProtocolConventions.draft_16?(state.protocol) or
+    if ProtocolConventions.draft_18?(state.protocol) or
          ProtocolConventions.moq_lite_05?(state.protocol) do
       Enum.find_value(state.pending_subscription_requests, fn
         {_handle, %{request: %{track: %{track: ^track_name}} = request, status: :approved}} ->
@@ -567,7 +566,7 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp initialization_ready?(state, init_track),
-    do: is_nil(init_track) or not ProtocolConventions.draft_16?(state.protocol)
+    do: is_nil(init_track) or not ProtocolConventions.draft_18?(state.protocol)
 
   defp maybe_publish_initialization(state, init_track, track) do
     if initialization_ready?(state, init_track),
@@ -820,7 +819,7 @@ defmodule Membrane.MOQX.Sink do
         _ctx,
         %{client: client} = state
       ) do
-    if ProtocolConventions.draft_16?(state.protocol) and published_track_pending?(track, state) do
+    if ProtocolConventions.draft_18?(state.protocol) and published_track_pending?(track, state) do
       published_track_became_ready(track, request_id, state)
     else
       subscriber_joined(track, published_subscription, request_id, state)
@@ -913,7 +912,7 @@ defmodule Membrane.MOQX.Sink do
         state = %{
           state
           | catalog_track: catalog_track,
-            catalog_ready?: not ProtocolConventions.draft_16?(state.protocol)
+            catalog_ready?: not ProtocolConventions.draft_18?(state.protocol)
         }
 
         catalog_track_registered(state)
@@ -1432,9 +1431,8 @@ defmodule Membrane.MOQX.Sink do
   end
 
   defp catalog_snapshot(state) do
-    convention = if state.profile == :moqtail_cmsf, do: :draft_16, else: :cloudflare_draft_14
     format = if state.profile == :moqtail_cmsf, do: :moqtail_cmsf, else: :cloudflare
-    raw = ProtocolConventions.catalog(convention, state.namespace, catalog_tracks(state))
+    raw = ProtocolConventions.catalog(state.profile, state.namespace, catalog_tracks(state))
     # CMSF encoding uses its raw representation; receiving codec validation is
     # intentionally not a restriction on the plugin's open packaging contract.
     {:ok, %MOQX.Catalog{format: format, tracks: [], raw: raw, namespace: state.namespace}}
@@ -1478,7 +1476,7 @@ defmodule Membrane.MOQX.Sink do
         MOQX.publish_catalog(state.client, state.catalog_track, catalog)
       else
         # MOQX's catalog publication API has no per-object priority option.
-        # CMSF draft-16 catalogs require our existing priority-zero convention.
+        # Standard MOQT CMSF catalogs use the protocol's priority-zero convention.
         with {:ok, payload} <- MOQX.Catalog.encode(catalog) do
           MOQX.publish_object(state.client, state.catalog_track, %MOQX.Object{
             group_id: state.catalog_revision,
@@ -1518,7 +1516,7 @@ defmodule Membrane.MOQX.Sink do
   defp schedule_catalog_refresh(state) do
     cancel_catalog_refresh(state)
 
-    if ProtocolConventions.draft_16?(state.protocol) and
+    if ProtocolConventions.draft_18?(state.protocol) and
          is_integer(state.catalog_refresh_interval) do
       ref = Process.send_after(self(), :refresh_catalog, state.catalog_refresh_interval)
       %{state | catalog_timer: ref}

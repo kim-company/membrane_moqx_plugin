@@ -20,6 +20,7 @@ defmodule Membrane.MOQX.Integration.LiteRoundtripTest do
   require Pad
 
   @moduletag :integration
+  @moduletag :moq_lite_05
   @timeout 15_000
 
   test "HANG catalog selection composes with legacy media framing over native QUIC" do

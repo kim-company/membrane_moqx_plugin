@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+compose="$root/scripts/docker-compose-local"
+trap '"$compose" down --remove-orphans' EXIT INT TERM
+
+"$compose" up --build --detach moqtail-draft18-relay
+sleep 3
+
+MOQX_DRAFT18_ENDPOINT=moqt://localhost:4473 \
+MOQX_DRAFT18_CA_FILE="$root/.tmp/integration-certs/ca.pem" \
+  mix test --include integration --only moqtail_local \
+  test/integration/moqtail_draft_18_test.exs

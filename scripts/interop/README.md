@@ -7,7 +7,8 @@ are embedded, persisted, or needed for the local/public anonymous cases.
 
 ## Pinned reference
 
-- MOQX: 0.10.0, from this project's lockfile.
+- MOQX: 0.10.0 in the recorded certification run. The project's current
+  dependency is 0.11.0; reruns must record the resolved version.
 - moq-dev/moq: `fd477082c43c3c0738fb62d077d85ea078f10045` for relay and JS player.
 - Player: `@moq/watch` 0.5.2 at that commit, with its frozen Bun lockfile.
 - Relay: `moq-relay --server-version moq-lite-05` built with `cargo build --locked`.
@@ -161,7 +162,7 @@ least twenty decoded video frames and at least 96,000 non-silent audio samples.
 This is capture-then-decode verification, not a real-time decoder embedded in
 core Source/Sink. Keep the codecs/muxers/decoders outside the transport elements.
 
-## Empty-group decoder epochs (MOQX 0.10.0)
+## Empty-group decoder epochs (recorded with MOQX 0.10.0)
 
 Copy `browser/epochs.html` and `browser/epochs.ts` into the pinned reference's
 `interop/` directory, and `browser/check-epochs.mjs` beside the installed

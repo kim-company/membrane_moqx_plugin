@@ -9,7 +9,7 @@ defmodule Membrane.MOQX.SourceTest do
   alias Membrane.MOQX.{
     Session,
     Source,
-    TestDraft16Publisher,
+    TestDraft18Publisher,
     TestLite05Publisher,
     TestPublisher,
     Track,
@@ -43,7 +43,7 @@ defmodule Membrane.MOQX.SourceTest do
     {:ok, session} =
       Session.start_link(
         endpoint: publisher.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         transport: TestPublisher.transport(publisher)
       )
 
@@ -53,7 +53,7 @@ defmodule Membrane.MOQX.SourceTest do
 
     options = %Source{
       session: session,
-      protocol: :draft_16,
+      protocol: :moq_lite_05,
       track: track_ref,
       stream_format: %Track{packaging: "webvtt", initialization: nil}
     }
@@ -107,7 +107,7 @@ defmodule Membrane.MOQX.SourceTest do
     spec =
       child(:source, %Source{
         endpoint: publisher.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         track: track_ref,
         stream_format: stream_format,
         transport: TestPublisher.transport(publisher),
@@ -126,7 +126,7 @@ defmodule Membrane.MOQX.SourceTest do
         payload: "first",
         metadata: %{
           moqx: %Unit{
-            group_end?: false,
+            group_end?: true,
             group_id: 7,
             subgroup_id: 0,
             object_id: 0,
@@ -193,14 +193,14 @@ defmodule Membrane.MOQX.SourceTest do
     {:ok, session} =
       Session.start_link(
         endpoint: publisher.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         transport: TestPublisher.transport(publisher)
       )
 
     spec =
       child(:source, %Source{
         session: session,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         track: track_ref,
         stream_format: stream_format,
         subscription_options: [delivery_timeout: 50]
@@ -273,7 +273,7 @@ defmodule Membrane.MOQX.SourceTest do
     assert :ok = TestLite05Publisher.await_shutdown(publisher)
   end
 
-  test "uses explicit protocol identity for draft-16 datagrams through a shared session" do
+  test "uses explicit protocol identity for draft-18 datagrams through a shared session" do
     namespace = ["moqtail", "shared-datagrams"]
     track_ref = %MOQX.TrackRef{namespace: namespace, track: "video"}
 
@@ -294,7 +294,7 @@ defmodule Membrane.MOQX.SourceTest do
       })
 
     publisher =
-      TestDraft16Publisher.start(
+      TestDraft18Publisher.start(
         namespace,
         catalog,
         "video",
@@ -312,8 +312,8 @@ defmodule Membrane.MOQX.SourceTest do
     {:ok, session} =
       Session.start_link(
         endpoint: publisher.endpoint,
-        protocol: :draft_16,
-        transport: TestDraft16Publisher.transport(publisher)
+        protocol: :draft_18,
+        transport: TestDraft18Publisher.transport(publisher)
       )
 
     catalog_ref = %MOQX.TrackRef{namespace: namespace, track: "catalog"}
@@ -323,7 +323,7 @@ defmodule Membrane.MOQX.SourceTest do
     spec =
       child(:source, %Source{
         session: session,
-        protocol: :draft_16,
+        protocol: :draft_18,
         track: track_ref,
         stream_format: %Track{packaging: "cmaf", initialization: nil}
       })
@@ -332,8 +332,8 @@ defmodule Membrane.MOQX.SourceTest do
     pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
     assert_pipeline_notified(pipeline, :source, {:subscription_ready, ^track_ref})
 
-    TestDraft16Publisher.publish_media(publisher)
-    assert :ok = TestDraft16Publisher.await_datagrams(publisher)
+    TestDraft18Publisher.publish_media(publisher)
+    assert :ok = TestDraft18Publisher.await_datagrams(publisher)
 
     assert_sink_buffer(
       pipeline,
@@ -344,10 +344,10 @@ defmodule Membrane.MOQX.SourceTest do
       }
     )
 
-    TestDraft16Publisher.finish_media(publisher)
+    TestDraft18Publisher.finish_media(publisher)
     assert :ok = Testing.Pipeline.terminate(pipeline)
     assert :ok = Session.close(session)
-    assert :ok = TestDraft16Publisher.await_shutdown(publisher)
+    assert :ok = TestDraft18Publisher.await_shutdown(publisher)
   end
 
   test "matches subgroup completion by group and subgroup identity" do
@@ -371,7 +371,7 @@ defmodule Membrane.MOQX.SourceTest do
     spec =
       child(:source, %Source{
         endpoint: publisher.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         track: track_ref,
         stream_format: stream_format,
         transport: TestPublisher.transport(publisher),

@@ -28,7 +28,7 @@ defmodule Membrane.MOQX.Hang.Legacy do
   subsequent epoch may have backward PTS. Downstream decoders own their reset
   and playback policy. Unlike MediaEnd, this boundary contains no frame.
 
-  The container format is pinned by MOQX 0.10.0's HANG reference at moq-dev/moq
+  The container format is pinned by the HANG reference at moq-dev/moq
   `fd477082c43c3c0738fb62d077d85ea078f10045`. Both the container prefix and the
   Lite transport frame carry timing; neither is a substitute for the other.
   """

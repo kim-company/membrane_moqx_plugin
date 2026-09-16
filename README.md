@@ -3,13 +3,11 @@
 Membrane Framework Source and Sink elements for receiving and publishing
 arbitrary named object tracks through [`moqx`](https://github.com/dmorn/moqx).
 
-The plugin implements MoQ Lite draft-05, standard MOQT draft-16, and
-Cloudflare draft-14 over native QUIC. Implemented protocol support does not
-imply compatibility with every current public relay. See the dated
-[relay compatibility and retirement policy](docs/relay-compatibility.md):
-Cloudflare draft-14 and authenticated draft-16 controlled publication have
-observed immediate-EOS delivery failures, and the current public Moqtail
-relay requires draft-18, which MOQX 0.10.0 does not implement.
+The plugin implements standard MOQT draft-18 and, independently, MoQ Lite
+draft-05 over native QUIC with MOQX 0.11.0. Draft-14 and draft-16 were removed
+upstream and are no longer selectable. Implemented protocol support does not
+imply compatibility with every current public relay; see the dated
+[relay compatibility report](docs/relay-compatibility.md).
 
 Protocol selection is always explicit. `moqx` owns transport,
 draft-specific wire/lifecycle state, typed events, subscriptions,
@@ -46,6 +44,11 @@ bytes; the explicit HANG legacy filter adds or removes its container framing.
 Pipelines that need frame-level H.264 or AAC buffers from CMAF compose the
 appropriate CMAF/MP4 muxer or demuxer outside the core elements.
 
+MOQX decodes and validates catalogs and preserves normalized codec, packaging,
+dimensions, bitrate, timescale, language, and initialization metadata. It no
+longer supplies codec/rendition selectors or CMAF/container processing;
+downstream libraries own those policies and transformations.
+
 ## Elements
 
 - `Membrane.MOQX.Source` subscribes to exactly one selected track and emits its
@@ -80,8 +83,8 @@ already known:
 
 ```elixir
 child(:source, %Membrane.MOQX.Source{
-  endpoint: "moqt://draft-14.cloudflare.mediaoverquic.com:443",
-  protocol: :cloudflare_draft_14,
+  endpoint: "moqt://draft-18.cloudflare.mediaoverquic.com:443",
+  protocol: :draft_18,
   track: %MOQX.TrackRef{
     namespace: ["my-service", "camera-1"],
     track: "events"
@@ -93,15 +96,13 @@ child(:source, %Membrane.MOQX.Source{
 })
 ```
 
-The same element subscribes through standard draft-16. Supply
-`draft16_endpoint` for an explicitly compatible relay; the current public
-`relay.moqtail.dev` is not a draft-16 target. MOQX subscription options are
-passed through unchanged:
+The same element subscribes through any compatible draft-18 relay. MOQX
+subscription options are passed through unchanged:
 
 ```elixir
 child(:source, %Membrane.MOQX.Source{
-  endpoint: draft16_endpoint,
-  protocol: :draft_16,
+  endpoint: draft18_endpoint,
+  protocol: :draft_18,
   track: %MOQX.TrackRef{
     namespace: ["moqtail", "testsrc"],
     track: "video"
@@ -127,7 +128,7 @@ is advertised, link a dynamic output pad with `track` and `stream_format`
 options. This sends the subscription immediately and allows a remote
 pull-based publisher to provision the track on demand.
 
-For draft-16 CMSF catalogs, decoded inline `initData` becomes
+For Moqtail CMSF catalogs, decoded inline `initData` becomes
 `Membrane.MOQX.Track.initialization`; no initialization subscription is
 created. Cloudflare catalogs retain the separate `initTrack` subscription
 path.
@@ -143,7 +144,7 @@ track offers. Compose `Hang.Legacy` for already-encoded Opus/H.264, or the
 
 Local/public plugin roundtrips, pinned reference-player decoding, and reverse
 reference CMAF reception are recorded in [the HANG evidence report](docs/hang-interop-2026-09-07.md).
-MOQX 0.10.0 supplies bounded absent-track metadata provisioning and empty-group
+MOQX 0.11.0 supplies bounded absent-track metadata provisioning and empty-group
 codec epochs. Sink exposes opt-in metadata decisions; Source and the HANG
 adapters preserve `Membrane.MOQX.Event.EmptyGroup` independently of media and EOS.
 HANG catalogs support explicit plain or DEFLATE encoding; selected subscriptions
@@ -225,8 +226,8 @@ source
   ]
 )
 |> child(:moqx_sink, %Sink{
-  endpoint: "moqt://draft-14.cloudflare.mediaoverquic.com:443",
-  protocol: :cloudflare_draft_14,
+  endpoint: "moqt://draft-18.cloudflare.mediaoverquic.com:443",
+  protocol: :draft_18,
   profile: :cloudflare_cmsf,
   namespace: ["my-service", "camera-1"]
 })
@@ -235,7 +236,7 @@ source
 Compose an encoder and CMAF muxer upstream when starting from raw AAC or H.264.
 The Sink does not encode, mux, split, inspect, pace, or loop media samples.
 
-For standard draft-16 publication through a compatible relay, provide CMSF
+For standard draft-18 publication through a compatible relay, provide CMSF
 metadata as top-level selection/catalog fields. Initialization stays inline in
 the catalog:
 
@@ -264,17 +265,16 @@ source
   ]
 )
 |> child(:moqx_sink, %Membrane.MOQX.Sink{
-  endpoint: draft16_endpoint,
-  protocol: :draft_16,
+  endpoint: draft18_endpoint,
+  protocol: :draft_18,
   profile: :moqtail_cmsf,
   namespace: ["my-service", "camera-1"],
   catalog_refresh_interval: 1_000
 })
 ```
 
-Set a pad's `delivery: :datagram` to publish draft-16 object datagrams.
-`:subgroup` is the default. Cloudflare draft-14 remains subgroup-only and
-rejects datagram publication through MOQX.
+Set a pad's `delivery: :datagram` to publish draft-18 object datagrams.
+`:subgroup` is the default.
 
 ### Custom track adapters
 
@@ -319,7 +319,7 @@ or provision tracks only after they are requested:
 ```elixir
 child(:moqx_sink, %Membrane.MOQX.Sink{
   endpoint: endpoint,
-  protocol: :cloudflare_draft_14,
+  protocol: :draft_18,
   namespace: ["my-service", "channel"],
   inbound_subscriptions: :controlled,
   subscription_decision_timeout: 5_000,
@@ -353,7 +353,7 @@ Once its canonical stream format arrives, the Sink registers the track and
 accepts every approved request waiting for it. Multiple subscribers therefore
 share one logical pad and producer.
 
-For draft-16, the Sink waits for namespace readiness and each track's
+For draft-18, the Sink waits for namespace readiness and each track's
 `PUBLISH_OK` readiness before publishing catalogs, initialization, or media.
 Publisher track readiness is not counted as a remote subscriber and does not
 emit `TrackDemand`. Actual accepted subscribers alone drive join/leave counts
@@ -435,8 +435,10 @@ mix compile --warnings-as-errors
 mix credo --strict
 ```
 
-Hermetic element tests should use `MOQX.Testing.Transport`. Live Cloudflare and
-Moqtail checks remain explicitly selected integration tests.
+Hermetic element tests should use `MOQX.Testing.Transport`. CI also builds the
+pinned MOQtail draft-18 and Curley MoQ Lite 05 relays from source and runs the
+native-QUIC integration suites against loopback TLS. Public Cloudflare and
+Moqtail checks remain explicitly selected, operator-run tests.
 
 ### MoQ Lite native-QUIC validation
 
@@ -445,13 +447,13 @@ final explicit departures, later resubscription, an abrupt final connection
 close, bounded leave notification, timestamps, and retained topology through
 the public Membrane and MOQX APIs.
 
-The local gate uses the Curley relay pinned by `moqx` v0.8.0 certification to
+The local gate uses the Curley relay pinned by `moqx` v0.11.0 certification to
 commit `fd477082c43c3c0738fb62d077d85ea078f10045`. Start that release's
-`curley-moq-lite-05-relay` service on UDP 4463, then run:
+`curley-moq-lite-05-relay` service on UDP 4463 and run every Lite integration
+test with:
 
 ```bash
-MOQX_LITE_CA_FILE=/path/to/moqx/.tmp/integration-certs/ca.pem \
-  mix test --include integration test/integration/moq_lite_05_test.exs
+scripts/run-curley-moq-lite-05-integration
 ```
 
 The public gate is opt-in and uses a unique anonymous broadcast path:
@@ -464,11 +466,10 @@ MOQX_LITE_CA_FILE=/etc/ssl/cert.pem \
 
 ### Live Cloudflare validation
 
-These tests select `:cloudflare_draft_14` explicitly. Changing the endpoint
-does not change their protocol. The Source test currently fails against the
-public draft-14 relay when EOS follows the final buffer immediately; see
-[the evidence and successor-verification gate](docs/relay-compatibility.md).
-Do not insert a delay or wait for receipt before EOS to declare this gate green.
+These tests select `:draft_18` explicitly. Changing the endpoint does not
+change their protocol. Historical draft-14 and draft-16 observations remain in
+[the compatibility report](docs/relay-compatibility.md), but those protocols
+are no longer available in MOQX.
 
 Live relay tests are excluded from normal test runs. The Source test exercises
 an unadvertised subscription, controlled Sink provisioning, payload delivery,
@@ -485,31 +486,35 @@ MOQX_CMAF_FIXTURE=/tmp/input-fragmented.mp4 \
   mix test --only integration test/integration/cloudflare_sink_test.exs
 ```
 
-Both tests default to Cloudflare's public draft-14 relay. Override
-`MOQX_ENDPOINT` only for another compatible draft-14 relay.
-`MOQX_AUTHORIZATION_FILE` loads a token into `MOQX.Secret` for that existing
-draft-14 authorization path. It is not a verified Cloudflare draft-16 session
-authentication recipe. Cloudflare documents draft-16 tokens in the connection
-URL path; the authenticated controlled-publication check reproduced intermittent
-final-payload loss on immediate EOS. Completion certification and reusable
-secret-safe configuration are tracked
-in [MOQX #42](https://github.com/dmorn/moqx/issues/42).
+Both tests default to Cloudflare's draft-18 interoperability endpoint. Override
+`MOQX_ENDPOINT` only for another compatible draft-18 relay.
+`MOQX_AUTHORIZATION_FILE` loads an optional token into `MOQX.Secret`; never put
+token-bearing endpoint URLs in logs or source.
 
-### Live Moqtail draft-16 validation
+### Live Moqtail draft-18 validation
 
-The historical default `relay.moqtail.dev` now rejects draft-16. Set
-`MOQX_DRAFT16_ENDPOINT` to a caller-started, pinned compatible relay for each
-command below. Record the relay commit/image digest and TLS configuration.
-Changing only ALPN is not a protocol upgrade.
+Set `MOQX_DRAFT18_ENDPOINT` to override the public `relay.moqtail.dev:443`
+default. Record the relay commit/image digest and TLS configuration for
+repeatable interoperability evidence.
+
+CI and local development use MOQtail commit
+`0e265d8bf133f86e17472c59f14ca7dc62032900` without external credentials:
+
+```bash
+scripts/run-moqtail-draft18-integration
+```
+
+Both local scripts require Docker Compose, generate a loopback CA under
+`.tmp/integration-certs`, and clean up their relay containers on exit.
 
 The Source check requires that relay to already host a `moqtail/testsrc`
 namespace with a CMSF catalog and a live H.264 track. It preserves inline CMAF
 initialization, dynamically attaches the offered track, and receives media:
 
 ```bash
-MOQX_DRAFT16_ENDPOINT=moqt://your-pinned-draft16-relay:443 \
+MOQX_DRAFT18_ENDPOINT=moqt://your-draft18-relay:443 \
   mix test --include integration \
-  test/integration/moqtail_draft_16_test.exs:16
+  test/integration/moqtail_draft_18_test.exs:16
 ```
 
 The publication check uses synthetic WebVTT data and exercises a controlled,
@@ -518,26 +523,24 @@ CMAF fixture nor a pre-existing media publisher. It does not prove H.264
 playback or immediate final-object/EOS delivery:
 
 ```bash
-MOQX_DRAFT16_ENDPOINT=moqt://your-pinned-draft16-relay:443 \
+MOQX_DRAFT18_ENDPOINT=moqt://your-draft18-relay:443 \
   mix test --include integration \
-  test/integration/moqtail_draft_16_test.exs:70
+  test/integration/moqtail_draft_18_test.exs:70
 ```
 
 For an operator-run player smoke, use a player and relay pinned to mutually
-compatible draft-16 versions. The current public `player.moqtail.dev` /
-`relay.moqtail.dev` workflow is not certified with MOQX 0.8.1; successor work
-is tracked in [MOQX #43](https://github.com/dmorn/moqx/issues/43).
+compatible draft-18 versions.
 
 1. Use a paced producer of fresh, monotonically timestamped CMAF fragments;
    do not loop a static MP4 timeline through the Sink.
-2. Start the draft-16 Sink example and note its namespace.
-3. Open the matching player, select the same draft-16 relay endpoint, and
+2. Start the draft-18 Sink example and note its namespace.
+3. Open the matching player, select the same draft-18 relay endpoint, and
    enter that namespace.
 4. Record catalog discovery, `Playing`, the decoded resolution, and advancing
    playback.
 5. Terminate the Membrane pipeline and confirm the publication is withdrawn.
 
-Catalog refresh is enabled for draft-16 by default so a player attaching late
+Catalog refresh is enabled for draft-18 by default so a player attaching late
 can discover the current retained catalog. The refresh timer is cancelled on
 normal termination, publication failure/cancellation, protocol failure, and
 connection close. Set `catalog_refresh_interval: nil` to disable it.

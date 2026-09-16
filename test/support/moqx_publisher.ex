@@ -1,7 +1,7 @@
 defmodule Membrane.MOQX.TestPublisher do
   @moduledoc false
 
-  alias MOQX.Protocol.MOQTDraft14.{Codec, Messages}
+  alias MOQX.Protocol.MOQTDraft18.Codec
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
 
@@ -36,7 +36,7 @@ defmodule Membrane.MOQX.TestPublisher do
   end
 
   def transport(%__MODULE__{network: network}) do
-    {Support, network: network, profile: :draft_14}
+    {Support, network: network, profile: :draft_18}
   end
 
   def await_shutdown(%__MODULE__{task: task}) do
@@ -49,57 +49,58 @@ defmodule Membrane.MOQX.TestPublisher do
   end
 
   defp publish(parent, network, entries) do
-    with {:ok, ctx} <- Transport.new(Support, network: network, profile: :draft_14),
+    with {:ok, ctx} <- Transport.new(Support, network: network, profile: :draft_18),
          {:ok, listener, ctx} <- Transport.listen(ctx, 0),
          {:ok, {_ip, port}} <- Transport.local_address(ctx, listener) do
       send(parent, {:publisher_ready, port})
-      serve(ctx, listener, entries)
+      serve(ctx, listener, port, entries)
     end
   end
 
-  defp serve(ctx, listener, entries) do
+  defp serve(ctx, listener, port, entries) do
     with {:ok, conn, ctx} <- Transport.accept(ctx, listener, [], @timeout),
          {:ok, conn, ctx} <- Transport.handshake(ctx, conn, @timeout),
          {:ok, control, ctx} <- Transport.accept_stream(ctx, conn, [], @timeout),
-         {:ok, ctx} <- receive_client_setup(ctx, control),
-         {:ok, ctx} <- send_server_setup(ctx, control),
-         {:ok, ctx} <- serve_subscriptions(ctx, conn, control, entries),
+         {:ok, ctx} <- receive_client_setup(ctx, control, port),
+         {:ok, ctx} <- send_server_setup(ctx, conn),
+         {:ok, ctx} <- serve_subscriptions(ctx, conn, entries),
          {:ok, _event, _ctx} <- receive_connection_close(ctx, conn) do
       :ok
     end
   end
 
-  defp serve_subscriptions(ctx, _conn, _control, []), do: {:ok, ctx}
+  defp serve_subscriptions(ctx, _conn, []), do: {:ok, ctx}
 
   defp serve_subscriptions(
          ctx,
          conn,
-         control,
          [{:interleaved, track, subgroup_objects} | rest]
        ) do
-    with {:ok, subscribe, ctx} <- receive_subscribe(ctx, control),
+    with {:ok, request, ctx} <- Transport.accept_stream(ctx, conn, [], @timeout),
+         {:ok, subscribe, ctx} <- receive_subscribe(ctx, request),
          :ok <- validate_track(subscribe, track),
-         {:ok, ctx} <- accept_subscription(ctx, control, subscribe.request_id),
+         {:ok, ctx} <- accept_subscription(ctx, request, subscribe.request_id),
          {:ok, ctx} <-
            send_interleaved_subgroups(ctx, conn, subscribe.request_id, subgroup_objects),
-         {:ok, ctx} <- finish_subscription(ctx, control, subscribe.request_id, 2) do
-      serve_subscriptions(ctx, conn, control, rest)
+         {:ok, ctx} <- finish_subscription(ctx, request, 2) do
+      serve_subscriptions(ctx, conn, rest)
     end
   end
 
-  defp serve_subscriptions(ctx, conn, control, [{track, objects} | rest]) do
-    with {:ok, subscribe, ctx} <- receive_subscribe(ctx, control),
+  defp serve_subscriptions(ctx, conn, [{track, objects} | rest]) do
+    with {:ok, request, ctx} <- Transport.accept_stream(ctx, conn, [], @timeout),
+         {:ok, subscribe, ctx} <- receive_subscribe(ctx, request),
          :ok <- validate_track(subscribe, track),
-         {:ok, ctx} <- accept_subscription(ctx, control, subscribe.request_id),
+         {:ok, ctx} <- accept_subscription(ctx, request, subscribe.request_id),
          {:ok, ctx} <- send_objects(ctx, conn, subscribe.request_id, objects),
          {:ok, ctx} <-
-           finish_subscription(ctx, control, subscribe.request_id, length(object_groups(objects))) do
-      serve_subscriptions(ctx, conn, control, rest)
+           finish_subscription(ctx, request, length(object_groups(objects))) do
+      serve_subscriptions(ctx, conn, rest)
     end
   end
 
-  defp receive_client_setup(ctx, control) do
-    setup = Codec.client_setup()
+  defp receive_client_setup(ctx, control, port) do
+    setup = Codec.client_setup(URI.parse("moqt://localhost:#{port}"))
 
     case Transport.recv_stream(ctx, control, byte_size(setup)) do
       {:ok, ^setup, ctx} -> {:ok, ctx}
@@ -107,12 +108,10 @@ defmodule Membrane.MOQX.TestPublisher do
     end
   end
 
-  defp send_server_setup(ctx, control) do
-    setup = <<0x21, 0, 9, 0xC0000000FF00000E::64, 0>>
-
-    case Transport.send_stream(ctx, control, setup) do
-      {:ok, _send, ctx} -> {:ok, ctx}
-      other -> {:error, {:server_setup_failed, other}}
+  defp send_server_setup(ctx, conn) do
+    with {:ok, control, ctx} <- Transport.open_stream(ctx, conn, direction: :unidirectional),
+         {:ok, _send, ctx} <- Transport.send_stream(ctx, control, <<0xAF, 0, 0, 0>>) do
+      {:ok, ctx}
     end
   end
 
@@ -134,15 +133,7 @@ defmodule Membrane.MOQX.TestPublisher do
   end
 
   defp accept_subscription(ctx, control, request_id) do
-    message =
-      Codec.encode(%Messages.SubscribeOk{
-        request_id: request_id,
-        track_alias: request_id,
-        expires: 0,
-        group_order: :ascending,
-        largest_location: nil,
-        params: %{}
-      })
+    message = Codec.subscribe_ok(request_id, expires: 0, group_order: :ascending)
 
     case Transport.send_stream(ctx, control, message) do
       {:ok, _send, ctx} -> {:ok, ctx}
@@ -154,9 +145,14 @@ defmodule Membrane.MOQX.TestPublisher do
     Enum.reduce_while(object_groups(objects), {:ok, ctx}, fn [first | rest], {:ok, ctx} ->
       bytes =
         [subgroup_bytes(track_alias, first, true)] ++
-          Enum.map(rest, fn object ->
-            track_alias |> subgroup_bytes(object, true) |> subgroup_object_bytes()
-          end)
+          (rest
+           |> Enum.map_reduce(first.object_id, fn object, previous_object_id ->
+             {:ok, bytes} =
+               Codec.encode_subgroup_object(previous_object_id, %{object | end_of_group?: false})
+
+             {bytes, object.object_id}
+           end)
+           |> elem(0))
 
       with {:ok, stream, ctx} <-
              Transport.open_stream(ctx, conn, direction: :unidirectional),
@@ -184,9 +180,10 @@ defmodule Membrane.MOQX.TestPublisher do
          [{first, second}, other]
        ) do
     first_bytes = subgroup_bytes(track_alias, first, true)
-    second_bytes = subgroup_bytes(track_alias, second, true)
     other_bytes = subgroup_bytes(track_alias, other, false)
-    first_continuation = subgroup_object_bytes(second_bytes)
+
+    {:ok, first_continuation} =
+      Codec.encode_subgroup_object(first.object_id, %{second | end_of_group?: false})
 
     with {:ok, first_stream, ctx} <-
            Transport.open_stream(ctx, conn, direction: :unidirectional),
@@ -214,26 +211,13 @@ defmodule Membrane.MOQX.TestPublisher do
   end
 
   defp subgroup_bytes(track_alias, object, end_of_group?) do
-    <<type, rest::binary>> = Codec.encode_subgroup(track_alias, object)
-    type = if end_of_group?, do: Bitwise.bor(type, 0x08), else: type
-    <<type, rest::binary>>
+    Codec.encode_subgroup(track_alias, %{object | end_of_group?: end_of_group?})
   end
 
-  defp subgroup_object_bytes(bytes) do
-    {:ok, _header, object_bytes} = Codec.decode_subgroup_header(bytes)
-    object_bytes
-  end
+  defp finish_subscription(ctx, request, stream_count) do
+    message = Codec.publish_done(2, stream_count, "track ended")
 
-  defp finish_subscription(ctx, control, request_id, stream_count) do
-    message =
-      Codec.encode(%Messages.PublishDone{
-        request_id: request_id,
-        status_code: 2,
-        stream_count: stream_count,
-        reason_phrase: "track ended"
-      })
-
-    case Transport.send_stream(ctx, control, message) do
+    case Transport.send_stream(ctx, request, message, finish: true) do
       {:ok, _send, ctx} -> {:ok, ctx}
       other -> {:error, {:publish_done_failed, other}}
     end

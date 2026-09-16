@@ -1,8 +1,9 @@
 # HANG interoperability evidence — 2026-09-07
 
-These results apply to the current MOQX 0.9.0 integration work, not to a
-published plugin release. They supersede the older "no HANG implementation"
-baseline only for the combinations explicitly exercised below.
+These historical results applied to the MOQX 0.9.0 integration work, not to a
+published plugin release. Later dated addenda record the 0.10.0 release. The
+current plugin dependency is MOQX 0.11.0; these results remain evidence only for
+the pinned combinations explicitly exercised below.
 
 ## Pins and environment
 

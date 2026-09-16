@@ -38,7 +38,7 @@ defmodule Membrane.MOQX.SinkTest do
   alias Membrane.MOQX.{
     Sink,
     TestControlledSource,
-    TestDraft16Relay,
+    TestDraft18Relay,
     TestDynamicSource,
     TestLite05Relay,
     TestRelay
@@ -66,7 +66,7 @@ defmodule Membrane.MOQX.SinkTest do
           |> via_in(Pad.ref(:input, :video), options: [track_name: "video"])
           |> child(:sink, %Sink{
             endpoint: relay.endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             profile: :moqtail_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay)
@@ -100,7 +100,7 @@ defmodule Membrane.MOQX.SinkTest do
       |> via_in(Pad.ref(:input, :video), options: [track_name: "video", retention: :latest])
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         namespace: namespace,
         transport: TestRelay.transport(relay),
         inbound_subscriptions: :controlled,
@@ -611,9 +611,9 @@ defmodule Membrane.MOQX.SinkTest do
     assert :ok = TestLite05Relay.await_shutdown(relay)
   end
 
-  test "waits for draft-16 track readiness and publishes Moqtail catalogs without false demand" do
+  test "waits for draft-18 track readiness and publishes Moqtail catalogs without false demand" do
     namespace = ["operator", "camera"]
-    relay = TestDraft16Relay.start(namespace, "video", :subgroup)
+    relay = TestDraft18Relay.start(namespace, "video", :subgroup)
 
     stream_format = %Membrane.MOQX.Track{
       packaging: "cmaf",
@@ -643,29 +643,29 @@ defmodule Membrane.MOQX.SinkTest do
       )
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :draft_16,
+        protocol: :draft_18,
         profile: :moqtail_cmsf,
         namespace: namespace,
-        transport: TestDraft16Relay.transport(relay),
+        transport: TestDraft18Relay.transport(relay),
         catalog_refresh_interval: 25,
         track_demand_events: true
       })
 
     pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
 
-    assert :ok = TestDraft16Relay.await_pending(relay, "catalog")
+    assert :ok = TestDraft18Relay.await_pending(relay, "catalog")
 
     refute_receive {Testing.Pipeline, ^pipeline,
                     {:handle_child_notification, {{:publication_ready, _namespace}, :sink}}}
 
-    TestDraft16Relay.ready(relay, "catalog")
+    TestDraft18Relay.ready(relay, "catalog")
     assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
     refute_pipeline_notified(pipeline, :sink, {:subscriber_joined, "catalog", _, _})
 
-    assert :ok = TestDraft16Relay.await_pending(relay, "video")
+    assert :ok = TestDraft18Relay.await_pending(relay, "video")
     refute_pipeline_notified(pipeline, :sink, {:track_ready, _, "video"})
 
-    TestDraft16Relay.ready(relay, "video")
+    TestDraft18Relay.ready(relay, "video")
 
     assert_pipeline_notified(
       pipeline,
@@ -675,7 +675,7 @@ defmodule Membrane.MOQX.SinkTest do
 
     refute_pipeline_notified(pipeline, :sink, {:subscriber_joined, "video", _, _})
 
-    assert {:ok, capture} = TestDraft16Relay.capture(relay)
+    assert {:ok, capture} = TestDraft18Relay.capture(relay)
 
     assert JSON.decode!(capture.catalog.payload) == %{
              "version" => 1,
@@ -701,12 +701,12 @@ defmodule Membrane.MOQX.SinkTest do
     assert capture.refresh.group_id > capture.catalog.group_id
 
     assert :ok = Testing.Pipeline.terminate(pipeline)
-    assert :ok = TestDraft16Relay.await_shutdown(relay)
+    assert :ok = TestDraft18Relay.await_shutdown(relay)
   end
 
-  test "publishes a draft-16 pad as datagrams when explicitly selected" do
+  test "publishes a draft-18 pad as datagrams when explicitly selected" do
     namespace = ["operator", "datagram"]
-    relay = TestDraft16Relay.start(namespace, "events", :datagram)
+    relay = TestDraft18Relay.start(namespace, "events", :datagram)
 
     stream_format = %Membrane.MOQX.Track{
       packaging: "chunk-per-object",
@@ -728,36 +728,36 @@ defmodule Membrane.MOQX.SinkTest do
       )
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :draft_16,
+        protocol: :draft_18,
         profile: :moqtail_cmsf,
         namespace: namespace,
-        transport: TestDraft16Relay.transport(relay),
+        transport: TestDraft18Relay.transport(relay),
         catalog_refresh_interval: 25
       })
 
     pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
 
-    assert :ok = TestDraft16Relay.await_pending(relay, "catalog")
-    TestDraft16Relay.ready(relay, "catalog")
+    assert :ok = TestDraft18Relay.await_pending(relay, "catalog")
+    TestDraft18Relay.ready(relay, "catalog")
     assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
 
-    assert :ok = TestDraft16Relay.await_pending(relay, "events")
-    TestDraft16Relay.ready(relay, "events")
+    assert :ok = TestDraft18Relay.await_pending(relay, "events")
+    TestDraft18Relay.ready(relay, "events")
     assert_pipeline_notified(pipeline, :sink, {:track_ready, _, "events"})
 
-    assert {:ok, capture} = TestDraft16Relay.capture(relay)
+    assert {:ok, capture} = TestDraft18Relay.capture(relay)
     assert capture.media.payload == buffer.payload
     assert capture.media.group_id == 0
     assert capture.media.object_id == 0
     assert capture.media.end_of_group?
 
     assert :ok = Testing.Pipeline.terminate(pipeline)
-    assert :ok = TestDraft16Relay.await_shutdown(relay)
+    assert :ok = TestDraft18Relay.await_shutdown(relay)
   end
 
-  test "finishes a draft-16 subscriber when its source reaches end of stream" do
+  test "finishes a draft-18 subscriber when its source reaches end of stream" do
     namespace = ["operator", "controlled"]
-    relay = TestDraft16Relay.start_controlled(namespace, "captions")
+    relay = TestDraft18Relay.start_controlled(namespace, "captions")
     stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
 
     spec =
@@ -765,10 +765,10 @@ defmodule Membrane.MOQX.SinkTest do
       |> via_in(Pad.ref(:input, :captions), options: [track_name: "captions"])
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :draft_16,
+        protocol: :draft_18,
         profile: :moqtail_cmsf,
         namespace: namespace,
-        transport: TestDraft16Relay.transport(relay),
+        transport: TestDraft18Relay.transport(relay),
         catalog_refresh_interval: nil,
         inbound_subscriptions: :controlled,
         track_demand_events: true
@@ -776,18 +776,18 @@ defmodule Membrane.MOQX.SinkTest do
 
     pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
 
-    assert :ok = TestDraft16Relay.await_pending(relay, "catalog")
-    TestDraft16Relay.ready(relay, "catalog")
+    assert :ok = TestDraft18Relay.await_pending(relay, "catalog")
+    TestDraft18Relay.ready(relay, "catalog")
     assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
 
-    assert :ok = TestDraft16Relay.await_pending(relay, "captions")
-    TestDraft16Relay.ready(relay, "captions")
+    assert :ok = TestDraft18Relay.await_pending(relay, "captions")
+    TestDraft18Relay.ready(relay, "captions")
     assert_pipeline_notified(pipeline, :sink, {:track_ready, _, "captions"})
 
     refute_pipeline_notified(pipeline, :sink, {:subscriber_joined, "captions", _, _})
     refute_pipeline_notified(pipeline, :source, {:track_demand, _, _})
 
-    subscriber = Task.async(fn -> TestDraft16Relay.subscribe(relay) end)
+    subscriber = Task.async(fn -> TestDraft18Relay.subscribe(relay) end)
 
     assert_pipeline_notified(
       pipeline,
@@ -815,7 +815,7 @@ defmodule Membrane.MOQX.SinkTest do
     )
 
     assert :ok = Testing.Pipeline.notify_child(pipeline, :source, :end_of_stream)
-    assert :ok = TestDraft16Relay.await_publisher_finish(relay, 1)
+    assert :ok = TestDraft18Relay.await_publisher_finish(relay, 1)
 
     assert_pipeline_notified(
       pipeline,
@@ -831,12 +831,12 @@ defmodule Membrane.MOQX.SinkTest do
     )
 
     assert :ok = Testing.Pipeline.terminate(pipeline)
-    assert :ok = TestDraft16Relay.await_shutdown(relay)
+    assert :ok = TestDraft18Relay.await_shutdown(relay)
   end
 
-  test "accepts a namespace-routed draft-16 track without sending PUBLISH" do
+  test "accepts a namespace-routed draft-18 track without sending PUBLISH" do
     namespace = ["operator", "reactive"]
-    relay = TestDraft16Relay.start_reactive(namespace, "captions")
+    relay = TestDraft18Relay.start_reactive(namespace, "captions")
     stream_format = %Membrane.MOQX.Track{packaging: "webvtt", initialization: nil}
 
     pipeline =
@@ -844,21 +844,21 @@ defmodule Membrane.MOQX.SinkTest do
         spec:
           child(:sink, %Sink{
             endpoint: relay.endpoint,
-            protocol: :draft_16,
+            protocol: :draft_18,
             profile: :moqtail_cmsf,
             namespace: namespace,
-            transport: TestDraft16Relay.transport(relay),
+            transport: TestDraft18Relay.transport(relay),
             catalog_refresh_interval: nil,
             inbound_subscriptions: :controlled,
             track_demand_events: true
           })
       )
 
-    assert :ok = TestDraft16Relay.await_pending(relay, "catalog")
-    TestDraft16Relay.ready(relay, "catalog")
+    assert :ok = TestDraft18Relay.await_pending(relay, "catalog")
+    TestDraft18Relay.ready(relay, "catalog")
     assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
 
-    subscriber = Task.async(fn -> TestDraft16Relay.subscribe(relay) end)
+    subscriber = Task.async(fn -> TestDraft18Relay.subscribe(relay) end)
 
     assert_pipeline_notified(
       pipeline,
@@ -897,7 +897,7 @@ defmodule Membrane.MOQX.SinkTest do
        %Membrane.MOQX.Event.TrackDemand{active?: true, subscriber_count: 1}}
     )
 
-    assert :ok = TestDraft16Relay.unsubscribe(relay)
+    assert :ok = TestDraft18Relay.unsubscribe(relay)
 
     assert_pipeline_notified(
       pipeline,
@@ -913,7 +913,7 @@ defmodule Membrane.MOQX.SinkTest do
     )
 
     assert :ok = Testing.Pipeline.terminate(pipeline)
-    assert :ok = TestDraft16Relay.await_shutdown(relay)
+    assert :ok = TestDraft18Relay.await_shutdown(relay)
   end
 
   test "surfaces and rejects a controlled subscription for an unknown track" do
@@ -925,7 +925,7 @@ defmodule Membrane.MOQX.SinkTest do
         spec:
           child(:sink, %Sink{
             endpoint: relay.endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
@@ -980,7 +980,7 @@ defmodule Membrane.MOQX.SinkTest do
       )
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay),
@@ -1037,7 +1037,7 @@ defmodule Membrane.MOQX.SinkTest do
 
     sink = %Sink{
       endpoint: relay.endpoint,
-      protocol: :cloudflare_draft_14,
+      protocol: :draft_18,
       profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay),
@@ -1104,7 +1104,7 @@ defmodule Membrane.MOQX.SinkTest do
 
     sink = %Sink{
       endpoint: relay.endpoint,
-      protocol: :cloudflare_draft_14,
+      protocol: :draft_18,
       profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay),
@@ -1144,7 +1144,7 @@ defmodule Membrane.MOQX.SinkTest do
                remove_link: {:sink, Pad.ref(:input, :subtitles)}
              )
 
-    assert {:error, %{code: 4, reason: "track removed before registration"}} =
+    assert {:error, %{code: 16, reason: "track removed before registration"}} =
              TestRelay.await_subscription_result(relay, request_id)
 
     assert_pipeline_notified(
@@ -1166,7 +1166,7 @@ defmodule Membrane.MOQX.SinkTest do
         spec:
           child(:sink, %Sink{
             endpoint: relay.endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
@@ -1203,7 +1203,7 @@ defmodule Membrane.MOQX.SinkTest do
                reason: "competing rejection"
              })
 
-    assert {:error, %{code: 4, reason: "competing rejection"}} =
+    assert {:error, %{code: 16, reason: "competing rejection"}} =
              TestRelay.await_subscription_result(relay, request_id)
 
     assert :ok =
@@ -1226,7 +1226,7 @@ defmodule Membrane.MOQX.SinkTest do
         spec:
           child(:sink, %Sink{
             endpoint: relay.endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
@@ -1248,7 +1248,7 @@ defmodule Membrane.MOQX.SinkTest do
     assert_pipeline_notified(
       pipeline,
       :sink,
-      {:subscription_cancelled, ^request, :unsubscribed}
+      {:subscription_cancelled, ^request, :peer_aborted_sending}
     )
 
     assert :ok =
@@ -1273,7 +1273,7 @@ defmodule Membrane.MOQX.SinkTest do
         spec:
           child(:sink, %Sink{
             endpoint: relay.endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
@@ -1332,7 +1332,7 @@ defmodule Membrane.MOQX.SinkTest do
       )
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay),
@@ -1385,7 +1385,7 @@ defmodule Membrane.MOQX.SinkTest do
         spec:
           child(:sink, %Sink{
             endpoint: relay.endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
@@ -1421,7 +1421,7 @@ defmodule Membrane.MOQX.SinkTest do
         spec:
           child(:sink, %Sink{
             endpoint: controlled_relay.endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(controlled_relay),
@@ -1466,7 +1466,7 @@ defmodule Membrane.MOQX.SinkTest do
         spec:
           child(:sink, %Sink{
             endpoint: relay.endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestRelay.transport(relay),
@@ -1631,7 +1631,7 @@ defmodule Membrane.MOQX.SinkTest do
       )
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay)
@@ -1695,7 +1695,7 @@ defmodule Membrane.MOQX.SinkTest do
       )
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay)
@@ -1787,7 +1787,7 @@ defmodule Membrane.MOQX.SinkTest do
       )
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay)
@@ -1801,7 +1801,7 @@ defmodule Membrane.MOQX.SinkTest do
       {:track_ready, Pad.ref(:input, :video), "video.m4s"}
     )
 
-    capture = Task.async(fn -> TestRelay.capture_many(relay, "video.m4s", 4) end)
+    capture = Task.async(fn -> TestRelay.capture_many(relay, "video.m4s", 5) end)
     assert_pipeline_notified(pipeline, :sink, {:subscriber_joined, "video.m4s", _, 1})
     Testing.Pipeline.notify_child(pipeline, :source, {:publish, buffers})
     Testing.Pipeline.notify_child(pipeline, :source, :end_of_stream)
@@ -1810,6 +1810,7 @@ defmodule Membrane.MOQX.SinkTest do
     assert Enum.map(objects, &{&1.group_id, &1.object_id, &1.status, &1.payload}) == [
              {0, 0, nil, "chunk-1"},
              {0, 1, nil, "chunk-2"},
+             {0, 2, :end_of_group, <<>>},
              {1, 0, nil, "segment-2"},
              {2, 0, :end_of_track, <<>>}
            ]
@@ -1873,7 +1874,7 @@ defmodule Membrane.MOQX.SinkTest do
       )
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay)
@@ -1916,7 +1917,7 @@ defmodule Membrane.MOQX.SinkTest do
 
     sink = %Sink{
       endpoint: relay.endpoint,
-      protocol: :cloudflare_draft_14,
+      protocol: :draft_18,
       profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
@@ -2008,7 +2009,7 @@ defmodule Membrane.MOQX.SinkTest do
       )
       |> child(:sink, %Sink{
         endpoint: relay.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestRelay.transport(relay)
@@ -2050,7 +2051,7 @@ defmodule Membrane.MOQX.SinkTest do
 
     sink = %Sink{
       endpoint: relay.endpoint,
-      protocol: :cloudflare_draft_14,
+      protocol: :draft_18,
       profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
@@ -2067,10 +2068,10 @@ defmodule Membrane.MOQX.SinkTest do
       :sink,
       {:publication_cancelled,
        %MOQX.ProtocolError{
-         protocol: :cloudflare_draft_14,
+         protocol: :draft_18,
          operation: :publish,
-         code: 2,
-         reason: "withdrawn"
+         code: 0,
+         reason: "request stream terminated"
        }}
     )
 
@@ -2085,7 +2086,7 @@ defmodule Membrane.MOQX.SinkTest do
 
     sink = %Sink{
       endpoint: relay.endpoint,
-      protocol: :cloudflare_draft_14,
+      protocol: :draft_18,
       profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
@@ -2111,7 +2112,7 @@ defmodule Membrane.MOQX.SinkTest do
 
     sink = %Sink{
       endpoint: relay.endpoint,
-      protocol: :cloudflare_draft_14,
+      protocol: :draft_18,
       profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
@@ -2166,7 +2167,7 @@ defmodule Membrane.MOQX.SinkTest do
 
     sink = %Sink{
       endpoint: relay.endpoint,
-      protocol: :cloudflare_draft_14,
+      protocol: :draft_18,
       profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
@@ -2180,7 +2181,7 @@ defmodule Membrane.MOQX.SinkTest do
       :sink,
       {:publication_failed,
        %MOQX.ProtocolError{
-         protocol: :cloudflare_draft_14,
+         protocol: :draft_18,
          operation: :publish,
          code: 1,
          reason: "unauthorized"
@@ -2198,7 +2199,7 @@ defmodule Membrane.MOQX.SinkTest do
 
     sink = %Sink{
       endpoint: relay.endpoint,
-      protocol: :cloudflare_draft_14,
+      protocol: :draft_18,
       profile: :cloudflare_cmsf,
       namespace: namespace,
       transport: TestRelay.transport(relay)
@@ -2216,28 +2217,6 @@ defmodule Membrane.MOQX.SinkTest do
       {:connection_closed, %{error_code: 77, initiator: :peer}}
     )
 
-    assert_child_terminated(pipeline, :sink)
-    assert :ok = Testing.Pipeline.terminate(pipeline)
-  end
-
-  test "reports a typed protocol failure and releases the Sink" do
-    namespace = ["live", "protocol-failure"]
-    relay = TestRelay.start(namespace)
-
-    sink = %Sink{
-      endpoint: relay.endpoint,
-      protocol: :cloudflare_draft_14,
-      profile: :cloudflare_cmsf,
-      namespace: namespace,
-      transport: TestRelay.transport(relay)
-    }
-
-    spec = {child(:sink, sink), group: :fatal_sink, crash_group_mode: :temporary}
-    pipeline = Testing.Pipeline.start_link_supervised!(spec: spec)
-    assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace})
-
-    assert :ok = TestRelay.fail_protocol(relay)
-    assert_pipeline_notified(pipeline, :sink, {:protocol_failed, :invalid_publish_namespace_ok})
     assert_child_terminated(pipeline, :sink)
     assert :ok = Testing.Pipeline.terminate(pipeline)
   end

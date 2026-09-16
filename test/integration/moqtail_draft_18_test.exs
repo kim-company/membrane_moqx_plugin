@@ -1,4 +1,4 @@
-defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
+defmodule Membrane.MOQX.Integration.MoqtailDraft18Test do
   use ExUnit.Case, async: false
 
   import Membrane.ChildrenSpec
@@ -14,7 +14,7 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
   @timeout 15_000
 
   test "discovers and attaches to Moqtail's current public CMSF publication" do
-    endpoint = draft_16_endpoint()
+    endpoint = draft_18_endpoint()
     namespace = ["moqtail", "testsrc"]
 
     pipeline =
@@ -22,9 +22,10 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
         spec:
           child(:source, %CatalogSource{
             endpoint: endpoint,
-            protocol: :draft_16,
+            protocol: :draft_18,
             profile: :moqtail_cmsf,
             namespace: namespace,
+            connect_options: tls_options(),
             timeout: @timeout
           })
       )
@@ -68,9 +69,10 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
     assert :ok = Testing.Pipeline.terminate(pipeline)
   end
 
+  @tag :moqtail_local
   test "accepts a namespace-routed subscription and publishes through Moqtail" do
-    endpoint = draft_16_endpoint()
-    namespace = ["membrane-moqx", "draft16-#{System.unique_integer([:positive])}"]
+    endpoint = draft_18_endpoint()
+    namespace = ["membrane-moqx", "draft18-#{System.unique_integer([:positive])}"]
     media_name = "captions"
     payload = "WEBVTT\n\n00:00.000 --> 00:01.000\nhello from membrane_moqx_plugin\n"
 
@@ -86,9 +88,10 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
         spec:
           child(:sink, %Sink{
             endpoint: endpoint,
-            protocol: :draft_16,
+            protocol: :draft_18,
             profile: :moqtail_cmsf,
             namespace: namespace,
+            connect_options: tls_options(),
             timeout: @timeout,
             catalog_refresh_interval: 500,
             inbound_subscriptions: :controlled,
@@ -99,7 +102,11 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
     assert_pipeline_notified(pipeline, :sink, {:publication_ready, ^namespace}, @timeout)
 
     assert {:ok, subscriber} =
-             MOQX.connect(endpoint, protocol: :draft_16, timeout: @timeout)
+             MOQX.connect(endpoint,
+               protocol: :draft_18,
+               connect_options: tls_options(),
+               timeout: @timeout
+             )
 
     try do
       media_ref = %MOQX.TrackRef{namespace: namespace, track: media_name}
@@ -177,7 +184,14 @@ defmodule Membrane.MOQX.Integration.MoqtailDraft16Test do
     end
   end
 
-  defp draft_16_endpoint do
-    System.get_env("MOQX_DRAFT16_ENDPOINT", "moqt://relay.moqtail.dev:443")
+  defp draft_18_endpoint do
+    System.get_env("MOQX_DRAFT18_ENDPOINT", "moqt://relay.moqtail.dev:443")
+  end
+
+  defp tls_options do
+    case System.get_env("MOQX_DRAFT18_CA_FILE") do
+      nil -> []
+      path -> [cacertfile: path]
+    end
   end
 end

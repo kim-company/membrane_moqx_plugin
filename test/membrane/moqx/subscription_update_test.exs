@@ -17,6 +17,7 @@ defmodule Membrane.MOQX.SubscriptionUpdateTest do
   alias Membrane.{Pad, Testing}
   require Pad
   alias MOQX.Protocol.MOQLite05.{Codec, Messages}
+  alias MOQX.Protocol.MOQTDraft18.Codec, as: Draft18Codec
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
 
@@ -259,13 +260,13 @@ defmodule Membrane.MOQX.SubscriptionUpdateTest do
 
   test "Sources distinguish local admission from typed peer update rejection and acknowledgement" do
     for mode <- [:standalone, :shared] do
-      peer = start_draft16_peer()
-      transport = {Support, network: peer.network, profile: :draft_16}
+      peer = start_draft18_peer()
+      transport = {Support, network: peer.network, profile: :draft_18}
 
       session =
         if mode == :shared do
           {:ok, session} =
-            Session.start_link(endpoint: peer.endpoint, protocol: :draft_16, transport: transport)
+            Session.start_link(endpoint: peer.endpoint, protocol: :draft_18, transport: transport)
 
           session
         end
@@ -278,7 +279,7 @@ defmodule Membrane.MOQX.SubscriptionUpdateTest do
             child(:source, %Source{
               endpoint: peer.endpoint,
               session: session,
-              protocol: :draft_16,
+              protocol: :draft_18,
               transport: transport,
               track: track,
               stream_format: %Track{packaging: "opus", initialization: nil}
@@ -318,14 +319,14 @@ defmodule Membrane.MOQX.SubscriptionUpdateTest do
     end
   end
 
-  test "draft-16 update rejection and acknowledgement reach the owner without ending its subscription" do
-    peer = start_draft16_peer()
+  test "draft-18 update rejection and acknowledgement reach the owner without ending its subscription" do
+    peer = start_draft18_peer()
 
     {:ok, session} =
       Session.start_link(
         endpoint: peer.endpoint,
-        protocol: :draft_16,
-        transport: {Support, network: peer.network, profile: :draft_16}
+        protocol: :draft_18,
+        transport: {Support, network: peer.network, profile: :draft_18}
       )
 
     {:ok, subscription} =
@@ -491,32 +492,38 @@ defmodule Membrane.MOQX.SubscriptionUpdateTest do
     %{task: task, network: network, endpoint: "moql://localhost:#{port}"}
   end
 
-  defp start_draft16_peer do
+  defp start_draft18_peer do
     {:ok, network} = Support.start_network()
     parent = self()
 
     task =
       Task.async(fn ->
-        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_16)
+        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_18)
         {:ok, listener, ctx} = Transport.listen(ctx, 0)
         {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
         send(parent, {:listening, port})
         {:ok, conn, ctx} = Transport.accept(ctx, listener, [], 2_000)
         {:ok, conn, ctx} = Transport.handshake(ctx, conn, 2_000)
-        {:ok, control, ctx} = Transport.accept_stream(ctx, conn, [], 2_000)
-        {0x20, _setup, ctx} = control_frame(ctx, control)
-        {:ok, _, ctx} = Transport.send_stream(ctx, control, <<0x21, 0, 1, 0, 0x15, 0, 1, 20>>)
-        {3, _subscribe, ctx} = control_frame(ctx, control)
-        {:ok, _, ctx} = Transport.send_stream(ctx, control, <<4, 0, 3, 0, 7, 0>>)
-        {2, <<2, _rest::binary>>, ctx} = control_frame(ctx, control)
-        {:ok, _, ctx} = Transport.send_stream(ctx, control, <<5, 0, 6, 2, 8, 0, 2, "no">>)
-        {2, <<4, _rest::binary>>, ctx} = control_frame(ctx, control)
-        {:ok, _, _ctx} = Transport.send_stream(ctx, control, <<7, 0, 2, 4, 0>>)
+        {:ok, client_control, ctx} = Transport.accept_stream(ctx, conn, [], 2_000)
+        setup = Draft18Codec.client_setup(URI.parse("moqt://localhost:#{port}"))
+        {:ok, ^setup, ctx} = Transport.recv_stream(ctx, client_control, byte_size(setup))
+        {:ok, server_control, ctx} = Transport.open_stream(ctx, conn, direction: :unidirectional)
+        {:ok, _, ctx} = Transport.send_stream(ctx, server_control, <<0xAF, 0, 0, 0>>)
+        {:ok, request, ctx} = Transport.accept_stream(ctx, conn, [], 2_000)
+        {3, subscribe_payload, ctx} = control_frame(ctx, request)
+        {:ok, _subscribe} = Draft18Codec.decode_subscribe(subscribe_payload)
+        {:ok, _, ctx} = Transport.send_stream(ctx, request, Draft18Codec.subscribe_ok(7))
+        {2, rejected_update, ctx} = control_frame(ctx, request)
+        {:ok, %{request_id: 2}} = Draft18Codec.decode_request_update(rejected_update)
+        {:ok, _, ctx} = Transport.send_stream(ctx, request, Draft18Codec.request_error(8, "no"))
+        {2, accepted_update, ctx} = control_frame(ctx, request)
+        {:ok, %{request_id: 4}} = Draft18Codec.decode_request_update(accepted_update)
+        {:ok, _, _ctx} = Transport.send_stream(ctx, request, Draft18Codec.request_ok())
 
         receive do
           :stop -> :ok
         after
-          5_000 -> raise "draft16 update peer timed out"
+          5_000 -> raise "draft18 update peer timed out"
         end
       end)
 

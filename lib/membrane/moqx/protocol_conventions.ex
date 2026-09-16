@@ -6,16 +6,14 @@ defmodule Membrane.MOQX.ProtocolConventions do
   CMSF schema helpers and the options needed to express one canonical
   `Membrane.MOQX.Track` through MOQX's public API.
 
-  Element catalog names now come from the explicit MOQX application profile.
-  This module's protocol-only catalog helpers describe the older CMSF
-  conventions and return no Lite catalog; they do not override a selected HANG
-  profile. Explicit profile-name/encoding validation below composes MOQX's public
-  profile names; catalog codecs and HANG media framing remain outside this module.
+  Element catalog names come from the explicit MOQX application profile.
+  Profile-name/encoding validation below composes MOQX's public profile names;
+  catalog codecs and HANG media framing remain outside this module.
   """
 
   alias Membrane.MOQX.Track
 
-  @type protocol :: :draft_16 | :cloudflare_draft_14 | :moq_lite_05 | module()
+  @type protocol :: :draft_18 | :moq_lite_05 | module()
 
   @doc "Resolves an explicit catalog profile and encoding without mislabeling payload bytes."
   @spec profile_catalog_track_name(MOQX.Profile.t(), :none | :deflate, binary() | nil) ::
@@ -40,40 +38,21 @@ defmodule Membrane.MOQX.ProtocolConventions do
     end
   end
 
-  @spec draft_16?(protocol()) :: boolean()
-  def draft_16?(:draft_16), do: true
-  def draft_16?(MOQX.Protocol.Draft16), do: true
-  def draft_16?(_protocol), do: false
+  @spec draft_18?(protocol()) :: boolean()
+  def draft_18?(:draft_18), do: true
+  def draft_18?(MOQX.Protocol.Draft18), do: true
+  def draft_18?(_protocol), do: false
 
   @spec moq_lite_05?(protocol()) :: boolean()
   def moq_lite_05?(:moq_lite_05), do: true
   def moq_lite_05?(MOQX.Protocol.MOQLite05), do: true
   def moq_lite_05?(_protocol), do: false
 
-  @spec catalog_track_name(protocol(), binary() | nil) :: binary() | nil
-  def catalog_track_name(protocol, _override)
-      when protocol in [:moq_lite_05, MOQX.Protocol.MOQLite05],
-      do: nil
-
-  def catalog_track_name(_protocol, override) when is_binary(override), do: override
-
-  def catalog_track_name(protocol, nil),
-    do: if(draft_16?(protocol), do: "catalog", else: ".catalog")
-
-  @spec initialization_mode(protocol()) :: :inline | :separate_track | :none
-  def initialization_mode(protocol) do
-    cond do
-      draft_16?(protocol) -> :inline
-      moq_lite_05?(protocol) -> :none
-      true -> :separate_track
-    end
-  end
-
   @spec track_options(protocol(), MOQX.PublishedTrack.retention(), MOQX.publication_delivery()) ::
           keyword()
   def track_options(protocol, retention, delivery) do
     options = [retention: retention]
-    if draft_16?(protocol), do: options ++ [delivery: delivery], else: options
+    if draft_18?(protocol), do: options ++ [delivery: delivery], else: options
   end
 
   @spec track_options(
@@ -97,35 +76,31 @@ defmodule Membrane.MOQX.ProtocolConventions do
 
   @spec catalog_priority(protocol(), 0..255) :: 0..255
   def catalog_priority(protocol, _media_priority)
-      when protocol in [:draft_16, MOQX.Protocol.Draft16],
+      when protocol in [:draft_18, MOQX.Protocol.Draft18],
       do: 0
 
   def catalog_priority(_protocol, media_priority), do: media_priority
 
-  @spec catalog(protocol(), [binary()], [{binary(), binary() | nil, Track.t()}]) :: map() | nil
-  def catalog(protocol, _namespace, _tracks)
-      when protocol in [:moq_lite_05, MOQX.Protocol.MOQLite05],
-      do: nil
-
-  def catalog(protocol, namespace, tracks) do
-    if draft_16?(protocol) do
-      %{
-        "version" => 1,
-        "tracks" => Enum.map(tracks, &draft_16_track/1)
-      }
-    else
-      %{
-        "version" => 1,
-        "streamingFormat" => 1,
-        "streamingFormatVersion" => "0.2",
-        "supportsDeltaUpdates" => false,
-        "commonTrackFields" => %{"namespace" => Enum.join(namespace, "/")},
-        "tracks" => Enum.map(tracks, &cloudflare_track/1)
-      }
-    end
+  @spec catalog(MOQX.Profile.t(), [binary()], [{binary(), binary() | nil, Track.t()}]) :: map()
+  def catalog(:moqtail_cmsf, _namespace, tracks) do
+    %{
+      "version" => 1,
+      "tracks" => Enum.map(tracks, &moqtail_track/1)
+    }
   end
 
-  defp draft_16_track({name, _init_name, %Track{} = track}) do
+  def catalog(:cloudflare_cmsf, namespace, tracks) do
+    %{
+      "version" => 1,
+      "streamingFormat" => 1,
+      "streamingFormatVersion" => "0.2",
+      "supportsDeltaUpdates" => false,
+      "commonTrackFields" => %{"namespace" => Enum.join(namespace, "/")},
+      "tracks" => Enum.map(tracks, &cloudflare_track/1)
+    }
+  end
+
+  defp moqtail_track({name, _init_name, %Track{} = track}) do
     track.selection_params
     |> Map.merge(track.catalog_fields)
     |> Map.put("name", name)

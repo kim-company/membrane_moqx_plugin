@@ -5,14 +5,28 @@ Evidence date: **2026-09-07**. Consumer baseline: plugin main
 Public services can change independently of a package release. These results
 are a dated observation, not a continuing availability guarantee.
 
-## Implemented support versus verified interoperability
+## Current implementation status
+
+As of the MOQX 0.11.0 migration, this plugin targets standard MOQT draft-18.
+Draft-14 and draft-16 were removed from MOQX and are no longer selectable here.
+MoQ Lite 05 remains supported independently through the protocol abstraction.
+The detailed draft-14/16 sections below are retained only as historical relay
+evidence; their commands and recommendations do not describe the current API.
+
+MOQX still decodes and validates catalogs and preserves normalized codec,
+packaging, dimensions, bitrate, timescale, language, and initialization
+metadata. Codec/rendition selection and CMAF/container processing now belong to
+downstream libraries: `MOQX.CMAF`, `Catalog.h264_tracks/1`, and
+`Catalog.select_h264/1` no longer exist.
+
+## Historical support versus verified interoperability
 
 | Protocol / relay | Implementation | Observed result | Guidance |
 | --- | --- | --- | --- |
 | MoQ Lite 05 / `moql://cdn.moq.dev:443/anon` | `:moq_lite_05` | Public native-QUIC smoke passed, including demand changes, resubscription, timestamps and abrupt final departure | Exact-track operation; no synthesized catalog or claim of HANG media compatibility |
-| Cloudflare draft-14 / `moqt://draft-14.cloudflare.mediaoverquic.com:443` | `:cloudflare_draft_14` | Media can flow, but immediate final-buffer/EOS failed | Retained with a known completion limitation; no new draft-14-specific workaround planned absent a concrete consumer requirement |
-| Cloudflare draft-16 / `moqt://draft-16.cloudflare.mediaoverquic.com:443` | `:draft_16` | Authenticated controlled Sink-to-Source publication works, but immediate EOS lost the payload in 3 of 5 runs | Not completion-certified; upgrading from draft-14 does not by itself solve the observed failure |
-| Current public Moqtail / `relay.moqtail.dev:443` | No draft-18 implementation in MOQX 0.8.1 | `moqt-16` rejected; TLS-verified `moqt-18` QUIC connection succeeded | Use a pinned draft-16 relay for existing workflows; public interoperability needs draft-18 implementation and delivery proof |
+| Cloudflare draft-14 / `moqt://draft-14.cloudflare.mediaoverquic.com:443` | Formerly `:cloudflare_draft_14` | Media can flow, but immediate final-buffer/EOS failed | Historical only; removed in MOQX 0.11.0 |
+| Cloudflare draft-16 / `moqt://draft-16.cloudflare.mediaoverquic.com:443` | Formerly `:draft_16` | Authenticated controlled Sink-to-Source publication works, but immediate EOS lost the payload in 3 of 5 runs | Historical only; removed in MOQX 0.11.0 |
+| Public Moqtail at the evidence date / `relay.moqtail.dev:443` | No draft-18 implementation in MOQX 0.8.1 | `moqt-16` rejected; TLS-verified `moqt-18` QUIC connection succeeded | Historical evidence that motivated draft-18 support |
 | Cloudflare draft-18 interop offering | No draft-18 implementation in MOQX 0.8.1 | Provider-documented test offering; not exercised by this plugin | Not a globally deployed or plugin-certified target |
 
 Cloudflare [documents draft-14 and draft-16 service and authenticated draft-16
@@ -35,12 +49,11 @@ and subgroup handling have hermetic coverage. A complete plugin Sink-to-relay-
 to-Source lifecycle regression and full Lite capability audit remain missing.
 These are tracked in [plugin #10](https://github.com/kim-company/membrane_moqx_plugin/issues/10).
 
-`CatalogSource` currently interprets the draft-14/16 CMSF profiles and rejects
-Lite. This is an implementation boundary, not a prohibition on catalogs in
-Lite: [HANG](https://doc.moq.dev/draft/moq-hang) defines application-level
-`catalog.json` media discovery. Neither interpreting that catalog nor HANG
-media/player interoperability is implemented. The module documentation is the
-source of truth for these API boundaries; this document records dated proof.
+At this evidence date, `CatalogSource` interpreted draft-14/16 CMSF profiles
+and rejected Lite. That boundary has since changed: current CMSF profiles run
+over draft-18, while HANG support remains independent over Lite. The module
+documentation is the source of truth for the current API; this document records
+dated proof.
 
 ## Cloudflare draft-14: immediate completion can lose the final object
 
@@ -179,19 +192,16 @@ receipt acknowledgement or arbitrary sleep before finish. It must also cover
 withdrawal, departure and reuse; retain the endpoint/version/date and sanitized
 receiver evidence. An authenticated handshake alone is insufficient.
 
-## Moqtail: pin the old target or implement the new protocol
+## Historical Moqtail migration evidence
 
 Current public Moqtail rejects draft-16 ALPN with `alpn_neg_failure` and accepts
 draft-18 at the QUIC handshake level. MOQX 0.8.1 cannot communicate in draft-18.
 Changing only ALPN or retrying another protocol implicitly is not supported.
 
-For existing draft-16 tests, explicitly set `MOQX_DRAFT16_ENDPOINT` to a
-compatible pinned relay. The historical test default is no longer a working
-public target. The catalog test additionally needs an active `moqtail/testsrc`
-CMSF/H.264 publisher; the controlled-publication test uses synthetic WebVTT,
-not a CMAF fixture. See the [README commands](../README.md#live-moqtail-draft-16-validation).
-A matching pinned player is needed for draft-16 playback evidence; a passing
-object test alone does not prove decoded/advancing H.264 playback.
+The draft-16 instructions that followed from this evidence were superseded by
+the MOQX 0.11.0 draft-18 implementation. Current integration commands are in
+the [README](../README.md#live-moqtail-draft-18-validation). A passing object
+test alone still does not prove decoded/advancing H.264 playback.
 
 [MOQX #43](https://github.com/dmorn/moqx/issues/43) owns the complete draft-18
 publisher/subscriber implementation and relay interoperability. Plugin
@@ -201,11 +211,10 @@ historical evidence; do not relabel them as current public compatibility.
 
 ## Retirement policy
 
-No protocol is removed or newly declared deprecated by this documentation.
-Draft-14 remains selectable with the limitation above; draft-16 remains a
-useful target for compatible deployments. MoQ Lite is a separate protocol
-family: its draft-05 number cannot be compared with MOQT draft-14/16/18 as an
-age or retirement rule.
+MOQX 0.11.0 removed draft-14 and draft-16; this plugin follows that upstream
+boundary and targets draft-18. MoQ Lite is a separate protocol family: its
+draft-05 number cannot be compared with MOQT draft-14/16/18 as an age or
+retirement rule.
 
 Before deprecating or deleting a protocol implementation:
 

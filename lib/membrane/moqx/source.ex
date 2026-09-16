@@ -19,7 +19,7 @@ defmodule Membrane.MOQX.Source do
   `{:subscription_updated, track_ref, parameters}` or
   `{:subscription_update_failed, track_ref, error}`; no command correlation is
   inferred. Lite has no update acknowledgement. An invalid/stale update or a
-  draft-16 peer rejection does not by itself terminate the active Source.
+  draft-18 peer rejection does not by itself terminate the active Source.
   Shared sessions enforce the calling Source's ownership of its subscription.
 
   For `:moq_lite_05`, the Source converts each frame timestamp from the
@@ -345,8 +345,8 @@ defmodule Membrane.MOQX.Source do
   end
 
   defp object_subgroup_key(%{group_id: group_id, subgroup_id: nil}, state) do
-    if ProtocolConventions.draft_16?(state.protocol),
-      do: :draft_16_datagram,
+    if ProtocolConventions.draft_18?(state.protocol),
+      do: :draft_18_datagram,
       else: {group_id, nil}
   end
 

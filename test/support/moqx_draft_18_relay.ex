@@ -1,7 +1,7 @@
-defmodule Membrane.MOQX.TestDraft16Relay do
+defmodule Membrane.MOQX.TestDraft18Relay do
   @moduledoc false
 
-  alias MOQX.Protocol.MOQTDraft16.{Codec, SubgroupDecoder}
+  alias MOQX.Protocol.MOQTDraft18.{Codec, SubgroupDecoder}
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
 
@@ -40,14 +40,14 @@ defmodule Membrane.MOQX.TestDraft16Relay do
       end)
 
     receive do
-      {:draft16_relay_ready, port} ->
+      {:draft18_relay_ready, port} ->
         %__MODULE__{
           task: task,
           network: network,
           endpoint: "moqt://localhost:#{port}"
         }
     after
-      @timeout -> raise "draft-16 test relay did not start"
+      @timeout -> raise "draft-18 test relay did not start"
     end
   end
 
@@ -55,8 +55,8 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     send(task.pid, {:subscribe, self()})
 
     receive do
-      {:draft16_subscribed, pid} when pid == task.pid -> :ok
-      {:draft16_relay_error, pid, reason} when pid == task.pid -> {:error, reason}
+      {:draft18_subscribed, pid} when pid == task.pid -> :ok
+      {:draft18_relay_error, pid, reason} when pid == task.pid -> {:error, reason}
     after
       @timeout -> {:error, :subscribe_timeout}
     end
@@ -66,8 +66,8 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     send(task.pid, {:unsubscribe, self()})
 
     receive do
-      {:draft16_unsubscribed, pid} when pid == task.pid -> :ok
-      {:draft16_relay_error, pid, reason} when pid == task.pid -> {:error, reason}
+      {:draft18_unsubscribed, pid} when pid == task.pid -> :ok
+      {:draft18_relay_error, pid, reason} when pid == task.pid -> {:error, reason}
     after
       @timeout -> {:error, :unsubscribe_timeout}
     end
@@ -77,22 +77,26 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     send(task.pid, {:await_publisher_finish, self(), stream_count})
 
     receive do
-      {:draft16_publisher_finished, pid} when pid == task.pid -> :ok
-      {:draft16_relay_error, pid, reason} when pid == task.pid -> {:error, reason}
+      {:draft18_publisher_finished, pid} when pid == task.pid -> :ok
+      {:draft18_relay_error, pid, reason} when pid == task.pid -> {:error, reason}
     after
       @timeout -> {:error, :publisher_finish_timeout}
     end
   end
 
   def transport(%__MODULE__{network: network}) do
-    {Support, network: network, profile: :draft_16}
+    {Support, network: network, profile: :draft_18}
   end
 
   def await_pending(%__MODULE__{task: task}, name) do
     receive do
-      {:draft16_track_pending, pid, ^name} when pid == task.pid -> :ok
+      {:draft18_track_pending, pid, ^name} when pid == task.pid -> :ok
     after
-      @timeout -> {:error, {:track_pending_timeout, name}}
+      @timeout ->
+        case Task.yield(task, 0) do
+          {:ok, result} -> {:error, {:relay_stopped_before_track_pending, name, result}}
+          nil -> {:error, {:track_pending_timeout, name}}
+        end
     end
   end
 
@@ -100,8 +104,8 @@ defmodule Membrane.MOQX.TestDraft16Relay do
 
   def capture(%__MODULE__{task: task}) do
     receive do
-      {:draft16_capture, pid, capture} when pid == task.pid -> {:ok, capture}
-      {:draft16_relay_error, pid, reason} when pid == task.pid -> {:error, reason}
+      {:draft18_capture, pid, capture} when pid == task.pid -> {:ok, capture}
+      {:draft18_relay_error, pid, reason} when pid == task.pid -> {:error, reason}
     after
       @timeout -> {:error, :capture_timeout}
     end
@@ -119,10 +123,10 @@ defmodule Membrane.MOQX.TestDraft16Relay do
 
   defp relay(parent, network, namespace, media_name, mode) do
     result =
-      with {:ok, ctx} <- Transport.new(Support, network: network, profile: :draft_16),
+      with {:ok, ctx} <- Transport.new(Support, network: network, profile: :draft_18),
            {:ok, listener, ctx} <- Transport.listen(ctx, 0),
            {:ok, {_ip, port}} <- Transport.local_address(ctx, listener) do
-        send(parent, {:draft16_relay_ready, port})
+        send(parent, {:draft18_relay_ready, port})
         serve(parent, ctx, listener, port, namespace, media_name, mode)
       end
 
@@ -131,11 +135,11 @@ defmodule Membrane.MOQX.TestDraft16Relay do
         :ok
 
       {:error, reason} = error ->
-        send(parent, {:draft16_relay_error, self(), reason})
+        send(parent, {:draft18_relay_error, self(), reason})
         error
 
       {:error, reason, _ctx} ->
-        send(parent, {:draft16_relay_error, self(), reason})
+        send(parent, {:draft18_relay_error, self(), reason})
         {:error, reason}
     end
   end
@@ -148,11 +152,19 @@ defmodule Membrane.MOQX.TestDraft16Relay do
 
     with {:ok, conn, ctx} <- Transport.accept(ctx, listener, [], @timeout),
          {:ok, conn, ctx} <- Transport.handshake(ctx, conn, @timeout),
-         {:ok, control, ctx} <- Transport.accept_stream(ctx, conn, [], @timeout),
-         {:ok, ctx} <- setup(ctx, control, port, if(initialized?, do: 16, else: 4)),
-         {:ok, ctx} <- accept_publication(ctx, control, namespace),
-         {:ok, ctx} <- ready_track(parent, ctx, control, 2, catalog_ref, 0) do
-      serve_mode(parent, ctx, conn, control, media_ref, mode)
+         {:ok, client_setup, ctx} <- Transport.accept_stream(ctx, conn, [], @timeout),
+         {:ok, ctx} <- setup(ctx, conn, client_setup, port) do
+      Process.put(:draft18_data_streams, [])
+      Process.put(:draft18_request_streams, [])
+      Process.put(:draft18_publish_streams, %{})
+
+      with {:ok, publication, ctx} <- accept_request_stream(ctx, conn),
+           {:ok, ctx} <- accept_publication(ctx, publication, namespace),
+           {:ok, ctx} <- ready_track(parent, ctx, conn, 2, catalog_ref, 0) do
+        # The fourth argument is the request-stream connection handle retained
+        # by the mode helpers (it used to be the draft-16 shared control stream).
+        serve_mode(parent, ctx, conn, conn, media_ref, mode)
+      end
     end
   end
 
@@ -172,7 +184,7 @@ defmodule Membrane.MOQX.TestDraft16Relay do
          {:ok, catalog, ctx} <- receive_subgroup(ctx, conn) do
       send(
         parent,
-        {:draft16_capture, self(), %{initialization: initialization, catalog: catalog}}
+        {:draft18_capture, self(), %{initialization: initialization, catalog: catalog}}
       )
 
       with {:ok, ctx} <-
@@ -181,7 +193,7 @@ defmodule Membrane.MOQX.TestDraft16Relay do
            {:ok, next_catalog, ctx} <- receive_subgroup(ctx, conn) do
         send(
           parent,
-          {:draft16_capture, self(),
+          {:draft18_capture, self(),
            %{initialization: next_initialization, catalog: next_catalog}}
         )
 
@@ -212,7 +224,7 @@ defmodule Membrane.MOQX.TestDraft16Relay do
         {object, ctx}
       end)
 
-    send(parent, {:draft16_capture, self(), prefix ++ objects})
+    send(parent, {:draft18_capture, self(), prefix ++ objects})
     await_stop(ctx, conn)
   end
 
@@ -231,7 +243,7 @@ defmodule Membrane.MOQX.TestDraft16Relay do
          {:ok, media, ctx} <- receive_media(ctx, conn, delivery, datagrams),
          {:ok, refresh, ctx} <- receive_subgroup(ctx, conn) do
       send(parent, {
-        :draft16_capture,
+        :draft18_capture,
         self(),
         %{catalog: catalog, media: media, refresh: refresh}
       })
@@ -249,17 +261,19 @@ defmodule Membrane.MOQX.TestDraft16Relay do
 
   defp receive_media(ctx, conn, delivery, []), do: receive_media(ctx, conn, delivery)
 
-  defp controlled_subscription(ctx, conn, control, media_ref, track_alias) do
+  defp controlled_subscription(ctx, conn, _control, media_ref, track_alias) do
     receive do
       {:subscribe, caller} ->
         subscribe = Codec.subscribe(1, media_ref, [])
 
-        with {:ok, _send, ctx} <- Transport.send_stream(ctx, control, subscribe),
-             expected = Codec.subscribe_ok(1, track_alias, group_order: :ascending),
+        with {:ok, request, ctx} <-
+               Transport.open_stream(ctx, conn, direction: :bidirectional),
+             {:ok, _send, ctx} <- Transport.send_stream(ctx, request, subscribe),
+             expected = Codec.subscribe_ok(track_alias, group_order: :ascending),
              {:ok, ^expected, ctx} <-
-               Transport.recv_stream(ctx, control, byte_size(expected)) do
-          send(caller, {:draft16_subscribed, self()})
-          await_unsubscribe(ctx, conn, control, caller)
+               Transport.recv_stream(ctx, request, byte_size(expected)) do
+          send(caller, {:draft18_subscribed, self()})
+          await_unsubscribe(ctx, conn, request, caller)
         end
     after
       @timeout -> {:error, :controlled_subscribe_timeout}
@@ -269,25 +283,21 @@ defmodule Membrane.MOQX.TestDraft16Relay do
   defp await_unsubscribe(ctx, conn, control, _subscriber) do
     receive do
       {:unsubscribe, caller} ->
-        unsubscribe = Codec.unsubscribe(1)
-        expected = Codec.publish_done(1, 3, 0, "subscription ended")
-
-        with {:ok, _send, ctx} <- Transport.send_stream(ctx, control, unsubscribe),
-             {:ok, ^expected, ctx} <-
-               Transport.recv_stream(ctx, control, byte_size(expected)) do
-          send(caller, {:draft16_unsubscribed, self()})
+        with {:ok, ctx} <- Transport.abort_sending(ctx, control, 0x01) do
+          send(caller, {:draft18_unsubscribed, self()})
           await_stop(ctx, conn)
         end
 
       {:await_publisher_finish, caller, stream_count} ->
-        expected_track = Codec.publish_done(4, 2, 1, "track ended")
-        expected_subscription = Codec.publish_done(1, 2, stream_count, "track ended")
+        expected_track = Codec.publish_done(2, 1, "track ended")
+        expected_subscription = Codec.publish_done(2, stream_count, "track ended")
+        publish_stream = Map.fetch!(Process.get(:draft18_publish_streams), 1)
 
         with {:ok, ^expected_track, ctx} <-
-               Transport.recv_stream(ctx, control, byte_size(expected_track)),
+               Transport.recv_stream(ctx, publish_stream, byte_size(expected_track)),
              {:ok, ^expected_subscription, ctx} <-
                Transport.recv_stream(ctx, control, byte_size(expected_subscription)) do
-          send(caller, {:draft16_publisher_finished, self()})
+          send(caller, {:draft18_publisher_finished, self()})
           await_stop(ctx, conn)
         end
     after
@@ -295,12 +305,14 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     end
   end
 
-  defp setup(ctx, control, port, max_request_id) do
+  defp setup(ctx, conn, control, port) do
     expected = Codec.client_setup(URI.parse("moqt://localhost:#{port}"))
 
     with {:ok, ^expected, ctx} <- Transport.recv_stream(ctx, control, byte_size(expected)),
+         {:ok, server_setup, ctx} <-
+           Transport.open_stream(ctx, conn, direction: :unidirectional),
          {:ok, _send, ctx} <-
-           Transport.send_stream(ctx, control, <<0x21, 0, 3, 1, 2, max_request_id>>) do
+           Transport.send_stream(ctx, server_setup, <<0xAF, 0, 0, 0>>) do
       {:ok, ctx}
     end
   end
@@ -309,28 +321,78 @@ defmodule Membrane.MOQX.TestDraft16Relay do
     expected = Codec.publish_namespace(0, namespace)
 
     with {:ok, ^expected, ctx} <- Transport.recv_stream(ctx, control, byte_size(expected)),
-         {:ok, _send, ctx} <- Transport.send_stream(ctx, control, <<0x07, 0, 2, 0, 0>>) do
+         {:ok, _send, ctx} <- Transport.send_stream(ctx, control, Codec.request_ok()) do
       {:ok, ctx}
     end
   end
 
-  defp ready_track(parent, ctx, control, request_id, track_ref, track_alias) do
+  defp ready_track(parent, ctx, conn, request_id, track_ref, track_alias) do
     expected = Codec.publish_track(request_id, track_ref, track_alias)
 
-    with {:ok, ^expected, ctx} <- Transport.recv_stream(ctx, control, byte_size(expected)),
+    with {:ok, request, ctx} <- accept_request_stream(ctx, conn),
+         {:ok, ^expected, ctx} <- Transport.recv_stream(ctx, request, byte_size(expected)),
          :ok <- notify_and_wait(parent, track_ref.track),
          {:ok, _send, ctx} <-
-           Transport.send_stream(
-             ctx,
-             control,
-             <<0x1E, 0, 2, request_id, 0>>
-           ) do
+           Transport.send_stream(ctx, request, Codec.request_ok()) do
+      Process.put(
+        :draft18_publish_streams,
+        Map.put(Process.get(:draft18_publish_streams, %{}), track_alias, request)
+      )
+
       {:ok, ctx}
+    end
+  end
+
+  # Request messages live on client-opened bidirectional streams in draft-18.
+  # A publisher may race a subgroup stream with the next request, so retain
+  # unidirectional streams for the data receiver instead of consuming them.
+  defp accept_request_stream(ctx, conn) do
+    case request_streams() do
+      [stream | rest] ->
+        Process.put(:draft18_request_streams, rest)
+        {:ok, stream, ctx}
+
+      [] ->
+        case Transport.accept_stream(ctx, conn, [], @timeout) do
+          {:ok, %{info: %{direction: :bidirectional}} = stream, ctx} ->
+            {:ok, stream, ctx}
+
+          {:ok, stream, ctx} ->
+            Process.put(:draft18_data_streams, data_streams() ++ [stream])
+            accept_request_stream(ctx, conn)
+
+          other ->
+            other
+        end
+    end
+  end
+
+  defp data_streams, do: Process.get(:draft18_data_streams, [])
+  defp request_streams, do: Process.get(:draft18_request_streams, [])
+
+  defp accept_data_stream(ctx, conn) do
+    case data_streams() do
+      [stream | rest] ->
+        Process.put(:draft18_data_streams, rest)
+        {:ok, stream, ctx}
+
+      [] ->
+        case Transport.accept_stream(ctx, conn, [], @timeout) do
+          {:ok, %{info: %{direction: :unidirectional}} = stream, ctx} ->
+            {:ok, stream, ctx}
+
+          {:ok, stream, ctx} ->
+            Process.put(:draft18_request_streams, request_streams() ++ [stream])
+            accept_data_stream(ctx, conn)
+
+          other ->
+            other
+        end
     end
   end
 
   defp notify_and_wait(parent, track_name) do
-    send(parent, {:draft16_track_pending, self(), track_name})
+    send(parent, {:draft18_track_pending, self(), track_name})
 
     receive do
       {:ready, ^track_name} -> :ok
@@ -364,24 +426,31 @@ defmodule Membrane.MOQX.TestDraft16Relay do
 
   defp receive_subgroup_with_datagrams(ctx, conn) do
     with {:ok, stream, ctx} <-
-           Transport.accept_stream(ctx, conn, [active: true], @timeout),
-         {:ok, ctx} <- Transport.set_active(ctx, stream, true),
-         {:ok, bytes, datagrams, ctx} <- receive_stream_data(ctx, stream, []),
-         {:ok, _decoder, [object]} <- SubgroupDecoder.push(%SubgroupDecoder{}, bytes) do
-      {:ok, object, datagrams, ctx}
+           accept_data_stream(ctx, conn),
+         {:ok, ctx} <- Transport.set_active(ctx, stream, true) do
+      receive_stream_object(ctx, stream, %SubgroupDecoder{}, [])
     end
   end
 
-  defp receive_stream_data(ctx, stream, datagrams) do
+  defp receive_stream_object(ctx, stream, decoder, datagrams) do
     case Transport.receive_event(ctx, @timeout) do
       {:ok, {:stream_data, ^stream, data, _metadata}, ctx} ->
-        {:ok, data, Enum.reverse(datagrams), ctx}
+        case SubgroupDecoder.push(decoder, data) do
+          {:ok, _decoder, [object | _terminal_events]} ->
+            {:ok, object, Enum.reverse(datagrams), ctx}
+
+          {:ok, decoder, []} ->
+            receive_stream_object(ctx, stream, decoder, datagrams)
+
+          {:error, reason} ->
+            {:error, reason, ctx}
+        end
 
       {:ok, {:datagram, _conn, data, _metadata}, ctx} ->
-        receive_stream_data(ctx, stream, [data | datagrams])
+        receive_stream_object(ctx, stream, decoder, [data | datagrams])
 
       {:ok, _event, ctx} ->
-        receive_stream_data(ctx, stream, datagrams)
+        receive_stream_object(ctx, stream, decoder, datagrams)
 
       other ->
         other

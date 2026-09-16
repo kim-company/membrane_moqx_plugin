@@ -19,6 +19,7 @@ defmodule Membrane.MOQX.Integration.LiteEpochRoundtripTest do
   require Pad
 
   @moduletag :integration
+  @moduletag :moq_lite_05
   @timeout 15_000
 
   test "HANG catalog media preserves backward epochs and the final empty group before EOS" do

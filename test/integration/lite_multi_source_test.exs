@@ -8,6 +8,7 @@ defmodule Membrane.MOQX.Integration.LiteMultiSourceTest do
   require Pad
 
   @moduletag :integration
+  @moduletag :moq_lite_05
   @timeout 45_000
 
   @tag timeout: 180_000

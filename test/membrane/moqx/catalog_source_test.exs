@@ -8,7 +8,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
 
   alias Membrane.MOQX.{
     CatalogSource,
-    TestDraft16Publisher,
+    TestDraft18Publisher,
     TestPublisher,
     Track,
     TrackOffer,
@@ -489,7 +489,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
     assert message =~ "CatalogSource requires a catalog profile"
   end
 
-  test "uses the draft-16 catalog convention and preserves inline initialization" do
+  test "uses the draft-18 catalog convention and preserves inline initialization" do
     namespace = ["moqtail", "pipeline"]
     media_ref = %MOQX.TrackRef{namespace: namespace, track: "video"}
     initialization = "inline-cmaf-init"
@@ -511,7 +511,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
         ]
       })
 
-    publisher = TestDraft16Publisher.start(namespace, catalog, "video", "fragment")
+    publisher = TestDraft18Publisher.start(namespace, catalog, "video", "fragment")
 
     on_exit(fn ->
       if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
@@ -522,10 +522,10 @@ defmodule Membrane.MOQX.CatalogSourceTest do
         spec:
           child(:source, %CatalogSource{
             endpoint: publisher.endpoint,
-            protocol: :draft_16,
+            protocol: :draft_18,
             profile: :moqtail_cmsf,
             namespace: namespace,
-            transport: TestDraft16Publisher.transport(publisher)
+            transport: TestDraft18Publisher.transport(publisher)
           })
       )
 
@@ -568,14 +568,14 @@ defmodule Membrane.MOQX.CatalogSourceTest do
       {:track_source, ^media_ref, {:subscription_ready, ^media_ref}}
     )
 
-    TestDraft16Publisher.publish_media(publisher)
+    TestDraft18Publisher.publish_media(publisher)
     assert_sink_buffer(pipeline, :sink, %Buffer{payload: "fragment"})
 
     assert :ok = Testing.Pipeline.terminate(pipeline)
-    assert :ok = TestDraft16Publisher.await_shutdown(publisher)
+    assert :ok = TestDraft18Publisher.await_shutdown(publisher)
   end
 
-  test "emits a completed draft-16 datagram group when the next group arrives" do
+  test "emits a completed draft-18 datagram group when the next group arrives" do
     namespace = ["moqtail", "datagrams"]
 
     catalog =
@@ -600,7 +600,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
     ]
 
     publisher =
-      TestDraft16Publisher.start(namespace, catalog, "video", objects, delivery: :datagram)
+      TestDraft18Publisher.start(namespace, catalog, "video", objects, delivery: :datagram)
 
     on_exit(fn ->
       if Process.alive?(publisher.task.pid), do: Process.exit(publisher.task.pid, :kill)
@@ -611,10 +611,10 @@ defmodule Membrane.MOQX.CatalogSourceTest do
         spec:
           child(:source, %CatalogSource{
             endpoint: publisher.endpoint,
-            protocol: :draft_16,
+            protocol: :draft_18,
             profile: :moqtail_cmsf,
             namespace: namespace,
-            transport: TestDraft16Publisher.transport(publisher)
+            transport: TestDraft18Publisher.transport(publisher)
           })
       )
 
@@ -635,8 +635,8 @@ defmodule Membrane.MOQX.CatalogSourceTest do
       {:track_source, track_ref, {:subscription_ready, track_ref}}
     )
 
-    TestDraft16Publisher.publish_media(publisher)
-    assert :ok = TestDraft16Publisher.await_datagrams(publisher)
+    TestDraft18Publisher.publish_media(publisher)
+    assert :ok = TestDraft18Publisher.await_datagrams(publisher)
 
     assert_sink_buffer(
       pipeline,
@@ -649,9 +649,9 @@ defmodule Membrane.MOQX.CatalogSourceTest do
       }
     )
 
-    TestDraft16Publisher.finish_media(publisher)
+    TestDraft18Publisher.finish_media(publisher)
     assert :ok = Testing.Pipeline.terminate(pipeline)
-    assert :ok = TestDraft16Publisher.await_shutdown(publisher)
+    assert :ok = TestDraft18Publisher.await_shutdown(publisher)
   end
 
   test "offers catalog tracks and subscribes only when the exact pad is linked" do
@@ -684,7 +684,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
     spec =
       child(:source, %CatalogSource{
         endpoint: publisher.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestPublisher.transport(publisher)
@@ -765,7 +765,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
     spec =
       child(:source, %CatalogSource{
         endpoint: publisher.endpoint,
-        protocol: :cloudflare_draft_14,
+        protocol: :draft_18,
         profile: :cloudflare_cmsf,
         namespace: namespace,
         transport: TestPublisher.transport(publisher)
@@ -825,7 +825,7 @@ defmodule Membrane.MOQX.CatalogSourceTest do
         spec:
           child(:source, %CatalogSource{
             endpoint: publisher.endpoint,
-            protocol: :cloudflare_draft_14,
+            protocol: :draft_18,
             profile: :cloudflare_cmsf,
             namespace: namespace,
             transport: TestPublisher.transport(publisher)

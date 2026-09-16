@@ -19,9 +19,9 @@ defmodule Membrane.MOQX.ProfileInitializationTest do
     @next_init next_init
     test "pending initialization preserves media, subsequent #{@next_init || "nil"} format and EOS in input order" do
       alias Membrane.Buffer
-      alias Membrane.MOQX.{TestDraft16Relay, Unit}
+      alias Membrane.MOQX.{TestDraft18Relay, Unit}
       namespace = ["profiles", "queued-generations"]
-      relay = TestDraft16Relay.start_initialized_queue(namespace, "video", not is_nil(@next_init))
+      relay = TestDraft18Relay.start_initialized_queue(namespace, "video", not is_nil(@next_init))
       format = %Track{packaging: "cmaf", initialization: "v1"}
 
       publisher =
@@ -31,20 +31,20 @@ defmodule Membrane.MOQX.ProfileInitializationTest do
             |> via_in(Pad.ref(:input, :video), options: [track_name: "video"])
             |> child(:sink, %Sink{
               endpoint: relay.endpoint,
-              protocol: :draft_16,
+              protocol: :draft_18,
               profile: :cloudflare_cmsf,
               namespace: namespace,
               catalog_refresh_interval: nil,
-              transport: TestDraft16Relay.transport(relay)
+              transport: TestDraft18Relay.transport(relay)
             })
         )
 
       for name <- [".catalog", "video.init", "video"] do
-        assert :ok = TestDraft16Relay.await_pending(relay, name)
-        TestDraft16Relay.ready(relay, name)
+        assert :ok = TestDraft18Relay.await_pending(relay, name)
+        TestDraft18Relay.ready(relay, name)
       end
 
-      assert {:ok, _initial} = TestDraft16Relay.capture(relay)
+      assert {:ok, _initial} = TestDraft18Relay.capture(relay)
 
       Testing.Pipeline.notify_child(
         publisher,
@@ -52,7 +52,7 @@ defmodule Membrane.MOQX.ProfileInitializationTest do
         {:stream_format, %{format | initialization: "v2"}}
       )
 
-      assert :ok = TestDraft16Relay.await_pending(relay, "video.init.1")
+      assert :ok = TestDraft18Relay.await_pending(relay, "video.init.1")
 
       Testing.Pipeline.notify_child(
         publisher,
@@ -88,21 +88,21 @@ defmodule Membrane.MOQX.ProfileInitializationTest do
       Testing.Pipeline.notify_child(publisher, :producer, :end_of_stream)
       refute_pipeline_notified(publisher, :sink, {:track_ended, _, "video"}, 100)
 
-      TestDraft16Relay.ready(relay, "video.init.1")
-      assert {:ok, generation2} = TestDraft16Relay.capture(relay)
+      TestDraft18Relay.ready(relay, "video.init.1")
+      assert {:ok, generation2} = TestDraft18Relay.capture(relay)
       assert generation2.initialization.payload == "v2"
 
       assert %{"tracks" => [%{"initTrack" => "video.init.1"}]} =
                JSON.decode!(generation2.catalog.payload)
 
       if @next_init do
-        assert :ok = TestDraft16Relay.await_pending(relay, "video.init.2")
+        assert :ok = TestDraft18Relay.await_pending(relay, "video.init.2")
         refute_pipeline_notified(publisher, :sink, {:track_updated, _, "video", 2}, 100)
         refute_pipeline_notified(publisher, :sink, {:track_ended, _, "video"}, 100)
-        TestDraft16Relay.ready(relay, "video.init.2")
+        TestDraft18Relay.ready(relay, "video.init.2")
       end
 
-      assert {:ok, objects} = TestDraft16Relay.capture(relay)
+      assert {:ok, objects} = TestDraft18Relay.capture(relay)
 
       [media2, catalog3, media3, eos, removed] =
         if @next_init do
@@ -125,18 +125,18 @@ defmodule Membrane.MOQX.ProfileInitializationTest do
       assert %{"tracks" => []} = JSON.decode!(removed.payload)
       assert_pipeline_notified(publisher, :sink, {:track_ended, _, "video"})
       Testing.Pipeline.terminate(publisher)
-      assert :ok = TestDraft16Relay.await_shutdown(relay)
+      assert :ok = TestDraft18Relay.await_shutdown(relay)
     end
   end
 
-  test "Cloudflare profile publishes separate initialization before its draft-16 catalog" do
-    alias Membrane.MOQX.TestDraft16Relay
-    namespace = ["profiles", "cloudflare-over-draft16"]
-    relay = TestDraft16Relay.start_initialized(namespace, "video")
+  test "Cloudflare profile publishes separate initialization before its draft-18 catalog" do
+    alias Membrane.MOQX.TestDraft18Relay
+    namespace = ["profiles", "cloudflare-over-draft18"]
+    relay = TestDraft18Relay.start_initialized(namespace, "video")
 
     format = %Track{
       packaging: "cmaf",
-      initialization: "draft16-init",
+      initialization: "draft18-init",
       selection_params: %{"codec" => "avc1.42001e"}
     }
 
@@ -147,20 +147,20 @@ defmodule Membrane.MOQX.ProfileInitializationTest do
           |> via_in(Pad.ref(:input, :video), options: [track_name: "video"])
           |> child(:sink, %Sink{
             endpoint: relay.endpoint,
-            protocol: :draft_16,
+            protocol: :draft_18,
             profile: :cloudflare_cmsf,
             namespace: namespace,
-            transport: TestDraft16Relay.transport(relay)
+            transport: TestDraft18Relay.transport(relay)
           })
       )
 
     for name <- [".catalog", "video.init", "video"] do
-      assert :ok = TestDraft16Relay.await_pending(relay, name)
-      TestDraft16Relay.ready(relay, name)
+      assert :ok = TestDraft18Relay.await_pending(relay, name)
+      TestDraft18Relay.ready(relay, name)
     end
 
-    assert {:ok, captured} = TestDraft16Relay.capture(relay)
-    assert captured.initialization.payload == "draft16-init"
+    assert {:ok, captured} = TestDraft18Relay.capture(relay)
+    assert captured.initialization.payload == "draft18-init"
 
     assert %{"tracks" => [%{"initTrack" => "video.init"}]} =
              JSON.decode!(captured.catalog.payload)
@@ -168,20 +168,20 @@ defmodule Membrane.MOQX.ProfileInitializationTest do
     Testing.Pipeline.notify_child(
       publisher,
       :producer,
-      {:stream_format, %{format | initialization: "draft16-init-v2"}}
+      {:stream_format, %{format | initialization: "draft18-init-v2"}}
     )
 
-    assert :ok = TestDraft16Relay.await_pending(relay, "video.init.1")
+    assert :ok = TestDraft18Relay.await_pending(relay, "video.init.1")
     refute_pipeline_notified(publisher, :sink, {:track_updated, _, "video", 1}, 50)
-    TestDraft16Relay.ready(relay, "video.init.1")
-    assert {:ok, updated} = TestDraft16Relay.capture(relay)
-    assert updated.initialization.payload == "draft16-init-v2"
+    TestDraft18Relay.ready(relay, "video.init.1")
+    assert {:ok, updated} = TestDraft18Relay.capture(relay)
+    assert updated.initialization.payload == "draft18-init-v2"
 
     assert %{"tracks" => [%{"initTrack" => "video.init.1"}]} =
              JSON.decode!(updated.catalog.payload)
 
     Testing.Pipeline.terminate(publisher)
-    assert :ok = TestDraft16Relay.await_shutdown(relay)
+    assert :ok = TestDraft18Relay.await_shutdown(relay)
   end
 
   for profile <- [:cloudflare_cmsf, :moqtail_cmsf] do
